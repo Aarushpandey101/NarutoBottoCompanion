@@ -39,7 +39,7 @@ cooldown_times = {
 aliases = {
     "m": "mission",
     "r": "report",
-    "t": "tower",
+    "to": "tower",
     "d": "daily",
     "w": "weekly"
 }
@@ -301,7 +301,7 @@ async def track_cooldown(ctx, cmd):
     
     duration = format_time(cooldown_times[cmd])
     messages = [
-        f"{emoji} **{cmd.upper()}** tracked! I'll ping you in **{duration}**, {ctx.author.mention}! Believe it! 🍜",
+        f"{emoji} **{cmd.upper()}** tracked! I'll ping you in **{duration}**, {ctx.author.mention}! Dattebayo! 🍜",
         f"{emoji} Got it! Your **{cmd}** is now on cooldown for **{duration}**, {ctx.author.mention}! 🥷",
         f"{emoji} Roger that! **{cmd}** cooldown started. See you in **{duration}**, {ctx.author.mention}! ⚡",
         f"{emoji} Alright! I'll remind you about **{cmd}** in **{duration}**, {ctx.author.mention}! Let's go! 🔥",
