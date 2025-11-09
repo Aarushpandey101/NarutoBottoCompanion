@@ -19,6 +19,11 @@ except:
     pass
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+
+if not DISCORD_TOKEN:
+    print("❌ Discord token not found in environment variables!")
+else:
+    print(f"✅ Loaded token: {DISCORD_TOKEN[:10]}... (length={len(DISCORD_TOKEN)})")
 ENABLE_GPT = os.getenv("ENABLE_GPT", "false").lower() == "true"
 
 intents = discord.Intents.default()
