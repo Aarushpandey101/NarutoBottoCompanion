@@ -1,0 +1,6 @@
+discord.py
+flask
+openai>=1.0.0
+discord.py
+flask
+openai
