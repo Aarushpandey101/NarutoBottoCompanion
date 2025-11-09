@@ -1,14 +1,1 @@
-{
-  "909007152469905450": {
-    "tower": {
-      "expires_at": 1762684564.6365654,
-      "channel_id": null,
-      "notified": false
-    },
-    "mission": {
-      "expires_at": 1762663118.1486654,
-      "channel_id": null,
-      "notified": true
-    }
-  }
-}
+{}
