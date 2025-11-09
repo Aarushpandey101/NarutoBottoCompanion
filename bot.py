@@ -264,7 +264,7 @@ async def track_mission(ctx):
 async def track_report(ctx):
     await track_cooldown(ctx, "report")
 
-@bot.command(name="t", aliases=["tower"])
+@bot.command(name="to", aliases=["tower"])
 async def track_tower(ctx):
     await track_cooldown(ctx, "tower")
 
@@ -424,7 +424,7 @@ async def help_command(ctx):
     
     embed.add_field(
         name="⚔️ Track Cooldowns",
-        value="```\nn m / n mission  - Track mission (1min)\nn r / n report   - Track report (10min)\nn t / n tower    - Track tower (6hrs)\nn d / n daily    - Track daily (24hrs)\nn w / n weekly   - Track weekly (7days)```",
+        value="```\nn m / n mission  - Track mission (1min)\nn r / n report   - Track report (10min)\nn to / n tower    - Track tower (6hrs)\nn d / n daily    - Track daily (24hrs)\nn w / n weekly   - Track weekly (7days)```",
         inline=False
     )
     
