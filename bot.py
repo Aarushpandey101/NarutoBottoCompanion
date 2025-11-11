@@ -27,7 +27,7 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="n ", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix=commands.when_mentioned_or("n ", "N "), intents=intents, help_command=None, case_insensitive=True)
 
 cooldown_times = {
     "mission": 60,
