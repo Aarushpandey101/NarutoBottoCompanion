@@ -715,5 +715,19 @@ async def ask_gpt(question_text):
     except:
         return None
 
-keep_alive()
-bot.run(DISCORD_TOKEN)
+import sys
+
+def start_bot():
+    keep_alive()
+    bot.run(DISCORD_TOKEN)
+
+if __name__ == "__main__":
+    while True:
+        try:
+            start_bot()
+        except Exception as e:
+            print(f"❌ Bot crashed: {e}")
+            print("🔁 Restarting in 5 seconds...")
+            time.sleep(5)
+            os.execv(sys.executable, ['python'] + sys.argv)
+
