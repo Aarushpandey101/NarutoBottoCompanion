@@ -28,7 +28,8 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="n ", intents=intents, help_command=None)
+# MODIFIED LINE BELOW: Added list for prefix and case_insensitive=True
+bot = commands.Bot(command_prefix=["n ", "N "], case_insensitive=True, intents=intents, help_command=None)
 
 cooldown_times = {
     "mission": 60,
