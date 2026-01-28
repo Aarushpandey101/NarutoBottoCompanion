@@ -76,7 +76,7 @@ def should_show_progress_bar(cmd):
 entertaining_messages = {
     "mission": [
         "Quick mission break! Almost ready, ninja! ⚡",
-        "Missions coming back soon, believe it! 🍜",
+        "Missions coming back soon, Dattebayo! 🍜",
         "Training hard? Rest up quick! 🥷",
         "Back in action shortly! Dattebayo! 🔥"
     ],
@@ -205,7 +205,7 @@ async def check_expired_cooldowns():
             emoji = cooldown_emojis.get(cmd, "✅")
             
             messages = [
-                f"{emoji} **{cmd.upper()} READY!** Believe it! Time to get back out there, {user.mention}!",
+                f"{emoji} **{cmd.upper()} READY!** Dattebayo! Time to get back out there, {user.mention}!",
                 f"{emoji} Your **{cmd}** cooldown is complete! The ninja way never stops, {user.mention}!",
                 f"{emoji} **{cmd.upper()}** is ready to go! Show them what you're made of, {user.mention}!",
                 f"{emoji} Cooldown finished for **{cmd}**! Let's do this, {user.mention}!",
