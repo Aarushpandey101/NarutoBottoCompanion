@@ -69,6 +69,7 @@ cooldown_colors = {
 
 cooldowns = {}
 pending_smart_tracks = {}
+SMART_TRACK_WAIT_SECONDS = 0.8
 
 def should_show_progress_bar(cmd):
     return cmd in ["daily", "weekly"]
@@ -99,6 +100,48 @@ entertaining_messages = {
         "Challenge mode recharging! Get ready! 🎮"
     ]
 }
+
+tracking_started_messages = {
+    "mission": [
+        "Mission log stamped. Kakashi would approve. 📘",
+        "Quest radar locked. Go be dramatic, ninja. 🌪️",
+        "Mission queued! Don't trip over your own kunai. 🗡️"
+    ],
+    "report": [
+        "Report filed with 97% less paperwork pain. ✍️",
+        "Intel secured. Time to look mysterious. 🕶️",
+        "Report timer armed. Bureaucracy defeated (for now). 🗂️"
+    ],
+    "tower": [
+        "Tower timer set. Stretch those shinobi calves. 🗼",
+        "Ascent cooldown recorded. No elevator, sorry. 🧗",
+        "Tower run locked in. Gravity remains undefeated. 🌌"
+    ],
+    "daily": [
+        "Daily secured! Ramen budget: protected. 🍜",
+        "Daily timer set. Wallet-kun says thank you. 💰",
+        "Daily reward logged. Responsible ninja behavior detected. ✅"
+    ],
+    "weekly": [
+        "Weekly recorded. Future-you sends gratitude. 🎁",
+        "Weekly timer armed. Legendary patience mode activated. ⏳",
+        "Weekly locked. Big reward energy building up. ⚡"
+    ],
+    "challenge": [
+        "Challenge timer set. Main character aura intensifies. 🥊",
+        "Battle cooldown logged. Dramatic comeback loading... 🎬",
+        "Challenge recorded. Keep the hype alive. 🔥"
+    ]
+}
+
+def get_friendly_tracking_message(cmd: str, duration: str) -> str:
+    emoji = cooldown_emojis.get(cmd, "⏰")
+    funny_line = random.choice(tracking_started_messages.get(cmd, ["Cooldown tracked!"]))
+    return (
+        f"{emoji} **{cmd.upper()} locked in!** Next run in **{duration}**.\n"
+        f"🔔 I'll tag you the moment it's ready again.\n"
+        f"{funny_line}"
+    )
 
 def format_time(seconds):
     if seconds <= 0:
@@ -277,7 +320,7 @@ async def on_message(message):
         
         print(f"🔍 Naruto Botto message detected: {full_text[:200]}")
         
-        if pending_smart_tracks and ("wait" in full_text.lower() or "cooldown" in full_text.lower()):
+        if pending_smart_tracks:
             time_secs = parse_time_string(full_text)
             
             if time_secs > 0:
@@ -327,7 +370,7 @@ async def on_message(message):
                         if should_show_progress_bar(detected_cmd):
                             embed = discord.Embed(
                                 title=f"{emoji} {detected_cmd.upper()} Cooldown Detected!",
-                                description=f"Found existing cooldown from Naruto Botto!",
+                                description=f"Naruto Botto already had this on cooldown—synced instantly!",
                                 color=cooldown_colors.get(detected_cmd, discord.Color.blue())
                             )
                             
@@ -337,8 +380,8 @@ async def on_message(message):
                             
                             embed.add_field(name="⏰ Time Remaining", value=f"**{time_str}**", inline=True)
                             embed.add_field(name="📊 Progress", value=progress, inline=False)
-                            embed.add_field(name="✅ Status", value="I'll ping you when it's ready!", inline=False)
-                            embed.set_footer(text=f"Cooldown tracked from Naruto Botto")
+                            embed.add_field(name="✅ Status", value="Reminder armed. I'll ping you exactly on time!", inline=False)
+                            embed.set_footer(text=f"Synced live from Naruto Botto ⚡")
                             
                             try:
                                 channel = bot.get_channel(channel_id)
@@ -348,7 +391,10 @@ async def on_message(message):
                                 print(f"Error sending existing cooldown: {e}")
                         else:
                             fun_msg = random.choice(entertaining_messages.get(detected_cmd, ["Tracked!"]))
-                            message_text = f"{emoji} **{detected_cmd.upper()}** detected! {time_str} remaining. I'll ping you!\n{fun_msg}"
+                            message_text = (
+                                f"{emoji} **{detected_cmd.upper()} synced!** {time_str} left on cooldown.\n"
+                                f"🔔 Reminder is set—I'll ping you when it's game time.\n{fun_msg}"
+                            )
                             
                             try:
                                 channel = bot.get_channel(channel_id)
@@ -470,8 +516,13 @@ async def track_cooldown_smart(ctx, cmd):
     }
     
     print(f"⏳ Waiting for Naruto Botto response for {cmd} (user: {user_id})")
-    
-    await asyncio.sleep(2.0)
+
+    try:
+        await ctx.message.add_reaction("👀")
+    except Exception:
+        pass
+
+    await asyncio.sleep(SMART_TRACK_WAIT_SECONDS)
     
     if user_id in pending_smart_tracks and cmd in pending_smart_tracks[user_id]:
         print(f"⏰ No Naruto Botto response detected, starting fresh timer for {cmd}")
@@ -492,27 +543,18 @@ async def track_cooldown_smart(ctx, cmd):
         if should_show_progress_bar(cmd):
             embed = discord.Embed(
                 title=f"{emoji} {cmd.upper()} Cooldown Started!",
-                description=f"Your **{cmd}** cooldown has been tracked!",
+                description="Timer is now locked and loaded.",
                 color=cooldown_colors.get(cmd, discord.Color.green())
             )
-            
-            embed.add_field(name="⏰ Duration", value=f"**{duration}**", inline=True)
-            embed.add_field(name="🔔 Reminder", value=f"I'll ping {ctx.author.mention} when ready!", inline=True)
+
+            embed.add_field(name="⏰ Next Run", value=f"**{duration}**", inline=True)
+            embed.add_field(name="🔔 Reminder", value=f"I'll tag {ctx.author.mention} right on time!", inline=True)
             embed.add_field(name="📊 Progress", value=get_progress_bar(0, cooldown_times[cmd]), inline=False)
-            
-            messages = [
-                "Dattebayo! 🍜",
-                "The ninja way never stops! 🥷",
-                "Believe it! ⚡",
-                "Let's go! 🔥"
-            ]
-            embed.set_footer(text=random.choice(messages))
-            
+            embed.set_footer(text=random.choice(tracking_started_messages.get(cmd, ["Dattebayo! 🍜"])))
+
             await ctx.send(embed=embed)
         else:
-            fun_msg = random.choice(entertaining_messages.get(cmd, ["Let's go!"]))
-            message = f"{emoji} **{cmd.upper()}** tracked! Ready in {duration}. I'll ping you!\n{fun_msg}"
-            await ctx.send(message)
+            await ctx.send(get_friendly_tracking_message(cmd, duration))
     else:
         print(f"✅ Naruto Botto responded! Message already sent by on_message handler")
 
