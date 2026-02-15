@@ -12,6 +12,24 @@ import os
 from typing import Dict, Optional
 import random
 
+
+def is_cloudflare_rate_limit_error(error: Exception) -> bool:
+    """Detect Cloudflare 1015/Discord API edge rate limit responses."""
+    if not isinstance(error, discord.HTTPException):
+        return False
+
+    if error.status != 429:
+        return False
+
+    body = str(error).lower()
+    cloudflare_markers = [
+        "cloudflare",
+        "error 1015",
+        "you are being rate limited",
+        "discord.com used cloudflare to restrict access",
+    ]
+    return any(marker in body for marker in cloudflare_markers)
+
 openai_client = None
 try:
     api_key = os.getenv("OPENAI_API_KEY")
@@ -831,7 +849,32 @@ async def ping_slash(interaction: discord.Interaction):
     
     embed.set_footer(text=f"Requested by {interaction.user.display_name}")
     
-    await interaction.response.send_message(embed=embed)
+    try:
+        await interaction.response.send_message(embed=embed)
+    except discord.HTTPException as exc:
+        if is_cloudflare_rate_limit_error(exc):
+            print(
+                "⚠️ Cloudflare 1015 rate limit while replying to /ping. "
+                "Your hosting IP is temporarily blocked by Discord's edge. "
+                "Wait for cooldown or move the bot to another host/IP."
+            )
+            return
+        raise
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    original_error = getattr(error, "original", error)
+
+    if is_cloudflare_rate_limit_error(original_error):
+        print(
+            "⚠️ App command failed due to Cloudflare 1015/IP rate limit from Discord. "
+            "Recommended actions: reduce command bursts, add per-user cooldowns, "
+            "and redeploy on a clean IP if the block persists."
+        )
+        return
+
+    print(f"❌ App command error: {error}")
 
 async def ask_gpt(question_text):
     if not openai_client:
