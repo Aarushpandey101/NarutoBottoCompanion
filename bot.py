@@ -1051,6 +1051,7 @@ def _extract_quiz_payload(message):
     title_bits = []
 
     option_label_re = re.compile(r"^(?:\d+|[1-3]️⃣|:one:|:two:|:three:|[A-C])$", re.IGNORECASE)
+    question_line_re = re.compile(r"^(?:who|what|which|when|where|why|how)\b.*\??$", re.IGNORECASE)
     numbered_line_re = re.compile(
         r"^(?:[•\-*]|\d+[\.\):]|[A-C][\.\):]|[1-3]️⃣|:one:|:two:|:three:)\s*(.+)$",
         re.IGNORECASE,
@@ -1062,13 +1063,21 @@ def _extract_quiz_payload(message):
 
     def add_option(option_text: str):
         option = re.sub(r"\s+", " ", option_text).strip(" `*_")
-        if option and option not in options:
+        if option and option not in options and not question_line_re.match(option):
             options.append(option)
 
     def add_question_text(text: str):
         cleaned = re.sub(r"\s+", " ", text).strip()
         if cleaned and not noise_line_re.match(cleaned):
             question_bits.append(cleaned)
+
+    def is_question_like(text: str) -> bool:
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        return bool(cleaned) and (
+            cleaned.endswith("?")
+            or question_line_re.match(cleaned)
+            or cleaned.lower().startswith(("who ", "what ", "which ", "when ", "where ", "why ", "how "))
+        )
 
     if message.content:
         chunks.append(message.content)
@@ -1094,29 +1103,47 @@ def _extract_quiz_payload(message):
                 match = numbered_line_re.match(line)
                 if match:
                     add_option(match.group(1))
+                    if QUIZ_DEBUG:
+                        quiz_log(f"Matched description option line: {line!r} -> {match.group(1)!r}")
                 else:
-                    add_question_text(line)
+                    if is_question_like(line):
+                        add_question_text(line)
+                    elif not noise_line_re.match(line):
+                        add_question_text(line)
         for field in embed.fields:
             field_name = (field.name or "").strip()
             field_value = (field.value or "").strip()
 
+            if QUIZ_DEBUG:
+                quiz_log(f"Field seen name={field_name!r} value={field_value[:120]!r}")
+
             if field_name and option_label_re.match(field_name):
                 if field_value:
                     add_option(field_value)
+                    if QUIZ_DEBUG:
+                        quiz_log(f"Field treated as option label {field_name!r} -> option {field_value!r}")
                 continue
 
             if field_value:
                 match = numbered_line_re.match(field_value)
                 if match:
                     add_option(match.group(1))
+                    if QUIZ_DEBUG:
+                        quiz_log(f"Matched field option value: {field_value!r} -> {match.group(1)!r}")
                 else:
-                    add_question_text(field_value)
+                    if is_question_like(field_value):
+                        add_question_text(field_value)
+                    elif not noise_line_re.match(field_value):
+                        add_question_text(field_value)
 
-            if field_name:
-                add_question_text(field_name)
+            if field_name and not option_label_re.match(field_name):
+                if is_question_like(field_name):
+                    add_question_text(field_name)
+                elif not noise_line_re.match(field_name):
+                    add_question_text(field_name)
 
     full_text = "\n".join(chunks + title_bits + question_bits).strip()
-    question_text = " ".join(title_bits + question_bits).strip()
+    question_text = " ".join(question_bits).strip()
 
     quiz_log(
         "Extracted payload "
@@ -1250,7 +1277,10 @@ async def maybe_answer_quiz(message):
         return
 
     full_text, options = _extract_quiz_payload(message)
-    has_question = "?" in full_text or "who" in full_text.lower() or "what" in full_text.lower()
+    has_question = bool(full_text) and any(
+        token in full_text.lower()
+        for token in ("who", "what", "which", "when", "where", "why", "how", "?")
+    )
     quiz_log(
         f"Detection check has_question={has_question} options={len(options)} text={full_text[:240]!r}"
     )
