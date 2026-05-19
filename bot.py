@@ -1066,7 +1066,11 @@ def _extract_quiz_payload(message):
     )
 
     def clean_line(text: str) -> str:
-        return re.sub(r"\s+", " ", text).strip().strip("`*_")
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        cleaned = cleaned.strip("`*_")
+        cleaned = re.sub(r"^[\*\-_>\s]+", "", cleaned)
+        cleaned = re.sub(r"[\*\-_>\s]+$", "", cleaned)
+        return cleaned
 
     def add_option(option_text: str):
         option = clean_line(option_text)
@@ -1220,7 +1224,6 @@ async def ask_gpt(question_text, options=None):
                             "Use only the provided options and return JSON only."
                         ),
                         response_mime_type="application/json",
-                        response_schema=QuizAnswer,
                         temperature=0,
                         max_output_tokens=64,
                     ),
@@ -1228,15 +1231,12 @@ async def ask_gpt(question_text, options=None):
             )
 
             quiz_log(f"Gemini raw response: {response.text[:240]!r}")
-            parsed = getattr(response, "parsed", None)
-            if parsed:
-                try:
-                    answer_index = int(parsed.answer_index)
-                except Exception:
-                    answer_index = None
+            try:
+                parsed = QuizAnswer.model_validate_json(response.text)
+                answer_index = int(parsed.answer_index)
+                answer_text = str(parsed.answer_text).strip()
 
-                answer_text = str(getattr(parsed, "answer_text", "")).strip()
-                if answer_index is not None and 1 <= answer_index <= len(options):
+                if 1 <= answer_index <= len(options):
                     quiz_log(f"Gemini parsed answer index: {answer_index}")
                     return answer_index
 
@@ -1246,8 +1246,8 @@ async def ask_gpt(question_text, options=None):
                         return idx
 
                 quiz_log("Gemini parsed response did not match supplied options.")
-            else:
-                quiz_log("Gemini response.parsed was empty or unavailable.")
+            except Exception as parse_error:
+                quiz_log(f"Gemini JSON parse failed: {parse_error}")
         except Exception as e:
             print(f"❌ Gemini quiz helper failed: {e}")
 
