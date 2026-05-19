@@ -14,6 +14,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from google import genai
 from google.genai import types
+from pydantic import BaseModel
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 ENABLE_GPT = os.getenv("ENABLE_GPT", "false").lower() == "true"
@@ -1044,8 +1045,11 @@ def quiz_log(message: str):
     if QUIZ_DEBUG:
         print(f"[QUIZ] {message}", flush=True)
 
+class QuizAnswer(BaseModel):
+    answer_index: int
+    answer_text: str
+
 def _extract_quiz_payload(message):
-    chunks = []
     options = []
     question_bits = []
     title_bits = []
@@ -1053,7 +1057,7 @@ def _extract_quiz_payload(message):
     option_label_re = re.compile(r"^(?:\d+|[1-3]️⃣|:one:|:two:|:three:|[A-C])$", re.IGNORECASE)
     question_line_re = re.compile(r"^(?:who|what|which|when|where|why|how)\b.*\??$", re.IGNORECASE)
     numbered_line_re = re.compile(
-        r"^(?:[•\-*]|\d+[\.\):]|[A-C][\.\):]|[1-3]️⃣|:one:|:two:|:three:)\s*(.+)$",
+        r"^(?:[•\-]|(?:\d+|[A-C]|[1-3]️⃣|:one:|:two:|:three:)[\.\):]?)\s+(.+)$",
         re.IGNORECASE,
     )
     noise_line_re = re.compile(
@@ -1061,18 +1065,21 @@ def _extract_quiz_payload(message):
         re.IGNORECASE,
     )
 
+    def clean_line(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip().strip("`*_")
+
     def add_option(option_text: str):
-        option = re.sub(r"\s+", " ", option_text).strip(" `*_")
+        option = clean_line(option_text)
         if option and option not in options and not question_line_re.match(option):
             options.append(option)
 
     def add_question_text(text: str):
-        cleaned = re.sub(r"\s+", " ", text).strip()
+        cleaned = clean_line(text)
         if cleaned and not noise_line_re.match(cleaned):
             question_bits.append(cleaned)
 
     def is_question_like(text: str) -> bool:
-        cleaned = re.sub(r"\s+", " ", text).strip()
+        cleaned = clean_line(text)
         return bool(cleaned) and (
             cleaned.endswith("?")
             or question_line_re.match(cleaned)
@@ -1080,10 +1087,12 @@ def _extract_quiz_payload(message):
         )
 
     if message.content:
-        chunks.append(message.content)
         for line in message.content.splitlines():
-            line = line.strip()
+            line = clean_line(line)
             if not line:
+                continue
+            if is_question_like(line):
+                add_question_text(line)
                 continue
             match = numbered_line_re.match(line)
             if match:
@@ -1093,26 +1102,27 @@ def _extract_quiz_payload(message):
 
     for embed in message.embeds:
         if embed.title:
-            title_bits.append(embed.title.strip())
+            title_bits.append(clean_line(embed.title))
         if embed.description:
-            chunks.append(embed.description)
             for line in embed.description.splitlines():
-                line = line.strip()
+                line = clean_line(line)
                 if not line:
+                    continue
+                if is_question_like(line):
+                    add_question_text(line)
+                    if QUIZ_DEBUG:
+                        quiz_log(f"Matched description question line: {line!r}")
                     continue
                 match = numbered_line_re.match(line)
                 if match:
                     add_option(match.group(1))
                     if QUIZ_DEBUG:
                         quiz_log(f"Matched description option line: {line!r} -> {match.group(1)!r}")
-                else:
-                    if is_question_like(line):
-                        add_question_text(line)
-                    elif not noise_line_re.match(line):
-                        add_question_text(line)
+                elif not noise_line_re.match(line):
+                    add_question_text(line)
         for field in embed.fields:
-            field_name = (field.name or "").strip()
-            field_value = (field.value or "").strip()
+            field_name = clean_line(field.name or "")
+            field_value = clean_line(field.value or "")
 
             if QUIZ_DEBUG:
                 quiz_log(f"Field seen name={field_name!r} value={field_value[:120]!r}")
@@ -1125,15 +1135,18 @@ def _extract_quiz_payload(message):
                 continue
 
             if field_value:
+                if is_question_like(field_value):
+                    add_question_text(field_value)
+                    if QUIZ_DEBUG:
+                        quiz_log(f"Field treated as question text: {field_value!r}")
+                    continue
                 match = numbered_line_re.match(field_value)
                 if match:
                     add_option(match.group(1))
                     if QUIZ_DEBUG:
                         quiz_log(f"Matched field option value: {field_value!r} -> {match.group(1)!r}")
                 else:
-                    if is_question_like(field_value):
-                        add_question_text(field_value)
-                    elif not noise_line_re.match(field_value):
+                    if not noise_line_re.match(field_value):
                         add_question_text(field_value)
 
             if field_name and not option_label_re.match(field_name):
@@ -1142,7 +1155,7 @@ def _extract_quiz_payload(message):
                 elif not noise_line_re.match(field_name):
                     add_question_text(field_name)
 
-    full_text = "\n".join(chunks + title_bits + question_bits).strip()
+    full_text = "\n".join(title_bits + question_bits + options).strip()
     question_text = " ".join(question_bits).strip()
 
     quiz_log(
@@ -1172,30 +1185,6 @@ def _pick_local_quiz_answer(question_text: str, options):
             best_option = option
 
     return best_option
-
-def _parse_gemini_quiz_response(raw_text: str, options):
-    try:
-        data = json.loads(raw_text)
-    except Exception:
-        return None
-
-    answer_text = str(data.get("answer_text", "")).strip()
-    answer_index = data.get("answer_index")
-
-    if answer_text:
-        for option in options:
-            if _normalize_quiz_text(option) == _normalize_quiz_text(answer_text):
-                return option
-
-    try:
-        answer_index = int(answer_index)
-    except Exception:
-        answer_index = None
-
-    if answer_index is not None and 1 <= answer_index <= len(options):
-        return options[answer_index - 1]
-
-    return None
 
 async def ask_gpt(question_text, options=None):
     if not options:
@@ -1231,21 +1220,7 @@ async def ask_gpt(question_text, options=None):
                             "Use only the provided options and return JSON only."
                         ),
                         response_mime_type="application/json",
-                        response_schema={
-                            "type": "object",
-                            "properties": {
-                                "answer_index": {
-                                    "type": "integer",
-                                    "description": "1-based index of the chosen option.",
-                                },
-                                "answer_text": {
-                                    "type": "string",
-                                    "description": "Exact text of the chosen option.",
-                                },
-                            },
-                            "required": ["answer_index", "answer_text"],
-                            "additionalProperties": False,
-                        },
+                        response_schema=QuizAnswer,
                         temperature=0,
                         max_output_tokens=64,
                     ),
@@ -1253,11 +1228,26 @@ async def ask_gpt(question_text, options=None):
             )
 
             quiz_log(f"Gemini raw response: {response.text[:240]!r}")
-            parsed = _parse_gemini_quiz_response(response.text, options)
+            parsed = getattr(response, "parsed", None)
             if parsed:
-                quiz_log(f"Gemini parsed answer: {parsed!r}")
-                return options.index(parsed) + 1
-            quiz_log("Gemini response could not be mapped to one of the supplied options.")
+                try:
+                    answer_index = int(parsed.answer_index)
+                except Exception:
+                    answer_index = None
+
+                answer_text = str(getattr(parsed, "answer_text", "")).strip()
+                if answer_index is not None and 1 <= answer_index <= len(options):
+                    quiz_log(f"Gemini parsed answer index: {answer_index}")
+                    return answer_index
+
+                for idx, option in enumerate(options, start=1):
+                    if _normalize_quiz_text(option) == _normalize_quiz_text(answer_text):
+                        quiz_log(f"Gemini parsed answer text matched option #{idx}")
+                        return idx
+
+                quiz_log("Gemini parsed response did not match supplied options.")
+            else:
+                quiz_log("Gemini response.parsed was empty or unavailable.")
         except Exception as e:
             print(f"❌ Gemini quiz helper failed: {e}")
 
