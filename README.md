@@ -8,7 +8,7 @@ An intelligent Discord bot that helps you track cooldowns for the Naruto Botto g
 - **Auto-Detection** - Monitors Naruto Botto messages and tracks cooldowns automatically
 - **Visual Dashboard** - Beautiful progress bars and color-coded status indicators
 - **Server Notifications** - Get pinged in your server when cooldowns expire
-- **Quiz Auto-Answer** - Optional GPT-powered automatic Naruto trivia answers
+- **Quiz Auto-Answer** - Optional Gemini-powered automatic Naruto trivia answers
 
 ## Quick Start 🚀
 
@@ -24,8 +24,10 @@ An intelligent Discord bot that helps you track cooldowns for the Naruto Botto g
 ### 2. Add Secrets in Replit
 Click the Secrets tab (🔒) and add:
 - `DISCORD_TOKEN` - Your Discord bot token (required)
-- `OPENAI_API_KEY` - Your OpenAI API key (optional, for quiz feature)
+- `GEMINI_API_KEY` - Your Gemini API key from Google AI Studio (optional, for quiz feature)
 - `ENABLE_GPT` - Set to `true` to enable quiz auto-answer (optional)
+- `NARUTO_BOTTO_USER_ID` - Optional Naruto Botto user ID for more reliable detection
+- `SMART_TRACK_WAIT_SECONDS` - Optional smart-detection delay in seconds, default `3.5`
 
 ### 3. Invite Bot to Your Server
 Use the OAuth2 URL generator in Discord Developer Portal with these permissions:
@@ -59,25 +61,25 @@ Use the OAuth2 URL generator in Discord Developer Portal with these permissions:
 
 ## How It Works 🔧
 
-1. **Smart Detection**: When you use `n d`, the bot waits 5 seconds to check if Naruto Botto reports an existing cooldown
+1. **Smart Detection**: When you use `n d`, the bot waits about 3.5 seconds to check if Naruto Botto reports an existing cooldown
 2. **Auto-Tracking**: The bot monitors Naruto Botto's messages and automatically tracks cooldowns
 3. **Notifications**: When a cooldown expires, you get pinged in the channel where you started it
-4. **Persistence**: All cooldowns are saved to `cooldowns.json` and survive restarts
+4. **Persistence**: All cooldowns are saved to `cooldowns.sqlite3` and survive restarts
 
 ## Tech Stack 💻
 
 - **Python 3.11** - Main language
 - **discord.py** - Discord bot framework
-- **OpenAI GPT-4** - Quiz auto-answer (optional)
+- **Google Gemini** - Quiz auto-answer (optional)
 - **Flask** - Keep-alive web server
-- **JSON** - Persistent data storage
+- **SQLite** - Persistent data storage
 
 ## Files 📁
 
 - `bot.py` - Main bot code
 - `keep_alive.py` - Flask server for uptime
 - `requirements.txt` - Python dependencies
-- `cooldowns.json` - Persistent cooldown storage (auto-generated)
+- `cooldowns.sqlite3` - Persistent cooldown storage (auto-generated)
 - `replit.md` - Detailed technical documentation
 
 ## Deployment 🚀

@@ -5,6 +5,6 @@ description = "Discord companion bot for Naruto Botto game with smart cooldown d
 requires-python = ">=3.11"
 dependencies = [
     "discord-py>=2.6.4",
-    "openai>=1.0.0",
     "flask>=3.0.0",
+    "google-genai>=1.0.0",
 ]

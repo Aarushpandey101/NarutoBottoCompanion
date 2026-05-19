@@ -1,27 +1,40 @@
 from keep_alive import keep_alive
+import asyncio
+import datetime
+import json
+import os
+import random
+import re
+import sqlite3
+import time
+from typing import Dict, Optional
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-import asyncio
-import json
-import re
-import time
-import datetime
-from openai import OpenAI
-import os
-from typing import Dict, Optional
-import random
-
-openai_client = None
-try:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if api_key:
-        openai_client = OpenAI(api_key=api_key)
-except:
-    pass
+from google import genai
+from google.genai import types
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 ENABLE_GPT = os.getenv("ENABLE_GPT", "false").lower() == "true"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+SMART_TRACK_WAIT_SECONDS = float(os.getenv("SMART_TRACK_WAIT_SECONDS", "3.5"))
+NARUTO_BOTTO_USER_ID = None
+
+try:
+    raw_bot_id = os.getenv("NARUTO_BOTTO_USER_ID", "").strip()
+    if raw_bot_id:
+        NARUTO_BOTTO_USER_ID = int(raw_bot_id)
+except ValueError:
+    print("⚠️ Invalid NARUTO_BOTTO_USER_ID value; falling back to name matching.")
+
+gemini_client = None
+if GEMINI_API_KEY:
+    try:
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"❌ Failed to initialize Gemini client: {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -30,6 +43,9 @@ intents.members = True
 
 # MODIFIED LINE BELOW: Added list for prefix and case_insensitive=True
 bot = commands.Bot(command_prefix=["n ", "N "], case_insensitive=True, intents=intents, help_command=None)
+
+DB_PATH = "cooldowns.sqlite3"
+LEGACY_JSON_PATH = "cooldowns.json"
 
 cooldown_times = {
     "mission": 60,
@@ -69,7 +85,41 @@ cooldown_colors = {
 
 cooldowns = {}
 pending_smart_tracks = {}
-SMART_TRACK_WAIT_SECONDS = 0.8
+
+def init_database():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cooldowns (
+                user_id INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                channel_id INTEGER,
+                notified INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, command)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cooldowns_expires_at ON cooldowns(expires_at)"
+        )
+
+def is_naruto_botto_author(author) -> bool:
+    if not author:
+        return False
+
+    if NARUTO_BOTTO_USER_ID and getattr(author, "id", None) == NARUTO_BOTTO_USER_ID:
+        return True
+
+    author_name = f"{getattr(author, 'name', '')} {getattr(author, 'display_name', '')}".lower()
+    return "naruto botto" in author_name
+
+def cooldown_row_to_dict(row):
+    return {
+        "expires_at": float(row["expires_at"]),
+        "channel_id": int(row["channel_id"]) if row["channel_id"] is not None else None,
+        "notified": bool(row["notified"]),
+    }
 
 def should_show_progress_bar(cmd):
     return cmd in ["daily", "weekly"]
@@ -185,32 +235,90 @@ def get_remaining_time(user_id: int, cmd: str) -> float:
 
 def save_cooldowns():
     try:
-        with open("cooldowns.json", "w") as f:
-            json.dump(cooldowns, f, indent=2)
+        init_database()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM cooldowns")
+            rows = []
+            for user_id, cmds in cooldowns.items():
+                for cmd, data in cmds.items():
+                    rows.append(
+                        (
+                            int(user_id),
+                            cmd,
+                            float(data["expires_at"]),
+                            int(data["channel_id"]) if data.get("channel_id") is not None else None,
+                            1 if data.get("notified", False) else 0,
+                        )
+                    )
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO cooldowns (user_id, command, expires_at, channel_id, notified)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
     except Exception as e:
         print(f"❌ Error saving cooldowns: {e}")
+
+def _load_legacy_json_cooldowns():
+    legacy_data = {}
+    try:
+        with open(LEGACY_JSON_PATH) as f:
+            data = json.load(f)
+        for uid_str, cmds in data.items():
+            uid = int(uid_str)
+            legacy_data[uid] = {}
+            for cmd, cmd_data in cmds.items():
+                if isinstance(cmd_data, (int, float)):
+                    legacy_data[uid][cmd] = {
+                        "expires_at": float(cmd_data),
+                        "channel_id": None,
+                        "notified": False,
+                    }
+                else:
+                    legacy_data[uid][cmd] = {
+                        "expires_at": float(cmd_data.get("expires_at", 0)),
+                        "channel_id": cmd_data.get("channel_id"),
+                        "notified": bool(cmd_data.get("notified", False)),
+                    }
+        print(f"📦 Migrated {len(legacy_data)} user cooldown record(s) from legacy JSON")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"❌ Error loading legacy cooldowns: {e}")
+    return legacy_data
 
 def load_cooldowns():
     global cooldowns
     try:
-        with open("cooldowns.json") as f:
-            data = json.load(f)
-            for uid_str, cmds in data.items():
-                uid = int(uid_str)
-                cooldowns[uid] = {}
-                for cmd, cmd_data in cmds.items():
-                    if isinstance(cmd_data, (int, float)):
-                        cooldowns[uid][cmd] = {
-                            "expires_at": float(cmd_data),
-                            "channel_id": None,
-                            "notified": False
-                        }
-                    else:
-                        cooldowns[uid][cmd] = cmd_data
-        print(f"📂 Loaded cooldowns for {len(cooldowns)} users")
-    except FileNotFoundError:
-        print("📂 No existing cooldowns file found, starting fresh")
-        cooldowns = {}
+        init_database()
+        loaded_count = 0
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT user_id, command, expires_at, channel_id, notified
+                FROM cooldowns
+                """
+            ).fetchall()
+
+        if rows:
+            cooldowns = {}
+            for row in rows:
+                user_id = int(row["user_id"])
+                cooldowns.setdefault(user_id, {})[row["command"]] = cooldown_row_to_dict(row)
+                loaded_count += 1
+            print(f"📂 Loaded {loaded_count} cooldown record(s) from SQLite")
+            return
+
+        legacy_data = _load_legacy_json_cooldowns()
+        cooldowns = legacy_data
+        if cooldowns:
+            save_cooldowns()
+            loaded_count = sum(len(cmds) for cmds in cooldowns.values())
+            print(f"📂 Loaded {loaded_count} cooldown record(s) and migrated them to SQLite")
+        else:
+            print("📂 No existing cooldown storage found, starting fresh")
     except Exception as e:
         print(f"❌ Error loading cooldowns: {e}")
         cooldowns = {}
@@ -286,7 +394,8 @@ async def on_ready():
     print(f"🎌 {bot.user} is now online!")
     print(f"📊 Connected to {len(bot.guilds)} server(s)")
     load_cooldowns()
-    check_expired_cooldowns.start()
+    if not check_expired_cooldowns.is_running():
+        check_expired_cooldowns.start()
     
     try:
         synced = await bot.tree.sync()
@@ -306,7 +415,7 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
-    if message.author.bot and "naruto botto" in message.author.name.lower():
+    if message.author.bot and is_naruto_botto_author(message.author):
         full_text = message.content
         
         if message.embeds:
@@ -341,10 +450,14 @@ async def on_message(message):
                     if cmd_to_process and message.channel.id == user_commands[cmd_to_process]["channel_id"]:
                         track_info = user_commands[cmd_to_process]
                         channel_id = track_info["channel_id"]
+                        track_event = track_info.get("event")
                         
                         print(f"📝 Processing {cmd_to_process} for user {user_id}")
                         print(f"⏰ Existing cooldown found: {time_secs}s for {cmd_to_process}")
                         
+                        if track_event and not track_event.is_set():
+                            track_event.set()
+
                         del pending_smart_tracks[user_id][cmd_to_process]
                         if not pending_smart_tracks[user_id]:
                             del pending_smart_tracks[user_id]
@@ -439,17 +552,8 @@ async def on_message(message):
                     print(f"✅ Auto-tracked {detected} cooldown for {user.display_name}")
             return
         
-        if ENABLE_GPT and openai_client:
-            has_question = "?" in full_text or "Who" in full_text or "What" in full_text
-            has_numbered_options = (":one:" in full_text or ":two:" in full_text or ":three:" in full_text or 
-                                   "1️⃣" in full_text or "2️⃣" in full_text or 
-                                   ("1" in full_text and "2" in full_text))
-            
-            if has_question and has_numbered_options:
-                response = await ask_gpt(full_text)
-                if response:
-                    await message.channel.send(response)
-            return
+        await maybe_answer_quiz(message)
+        return
     
     await bot.process_commands(message)
 
@@ -509,12 +613,14 @@ async def track_cooldown_smart(ctx, cmd):
     
     if user_id not in pending_smart_tracks:
         pending_smart_tracks[user_id] = {}
-    
+
+    track_event = asyncio.Event()
     pending_smart_tracks[user_id][cmd] = {
         "channel_id": ctx.channel.id,
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "event": track_event
     }
-    
+
     print(f"⏳ Waiting for Naruto Botto response for {cmd} (user: {user_id})")
 
     try:
@@ -522,7 +628,10 @@ async def track_cooldown_smart(ctx, cmd):
     except Exception:
         pass
 
-    await asyncio.sleep(SMART_TRACK_WAIT_SECONDS)
+    try:
+        await asyncio.wait_for(track_event.wait(), timeout=SMART_TRACK_WAIT_SECONDS)
+    except asyncio.TimeoutError:
+        pass
     
     if user_id in pending_smart_tracks and cmd in pending_smart_tracks[user_id]:
         print(f"⏰ No Naruto Botto response detected, starting fresh timer for {cmd}")
@@ -665,7 +774,7 @@ async def cooldown_group(ctx):
         )
         embed.add_field(
             name="Available Commands",
-            value="```\nn cd list              - Show all server cooldowns\nn cd user @member      - Check user's cooldowns\nn cd clear @member     - Clear all user cooldowns```",
+            value="```\nn cd list              - Show all server cooldowns\nn cd user @member      - Check user's cooldowns\nn cd clear @member     - Clear all user cooldowns\nn cd db                - Inspect the SQLite database```",
             inline=False
         )
         await ctx.send(embed=embed)
@@ -770,6 +879,58 @@ async def clear_cooldown(ctx, member: discord.Member, activity: str = None):
         save_cooldowns()
         await ctx.send(f"✅ Cleared all cooldowns for {member.mention}!")
 
+@cooldown_group.command(name="db", aliases=["inspect", "sqlite", "raw"])
+@commands.has_permissions(manage_guild=True)
+async def inspect_cooldown_db(ctx):
+    init_database()
+    now = time.time()
+
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT user_id, command, expires_at, channel_id, notified
+                FROM cooldowns
+                ORDER BY expires_at ASC
+                """
+            ).fetchall()
+    except Exception as e:
+        await ctx.send(f"❌ Failed to inspect SQLite database: {e}")
+        return
+
+    if not rows:
+        await ctx.send("📭 SQLite database is empty. No cooldowns are stored right now.")
+        return
+
+    active_count = sum(1 for row in rows if float(row["expires_at"]) > now)
+    expired_count = len(rows) - active_count
+
+    embed = discord.Embed(
+        title="🗄️ Cooldown Database Snapshot",
+        description="Live view of the SQLite cooldown store.",
+        color=discord.Color.teal(),
+    )
+    embed.add_field(name="Total Rows", value=str(len(rows)), inline=True)
+    embed.add_field(name="Active", value=str(active_count), inline=True)
+    embed.add_field(name="Expired", value=str(expired_count), inline=True)
+
+    lines = []
+    for row in rows[:10]:
+        remaining = float(row["expires_at"]) - now
+        status = "active" if remaining > 0 else "expired"
+        lines.append(
+            f"<@{row['user_id']}> | `{row['command']}` | {status} | `{format_time(max(0, remaining))}`"
+        )
+
+    embed.add_field(
+        name="First Rows",
+        value="\n".join(lines),
+        inline=False,
+    )
+    embed.set_footer(text="Use n cd list or n cd user for friendlier views")
+    await ctx.send(embed=embed)
+
 @bot.command(name="help", aliases=["commands", "h"])
 async def help_command(ctx):
     embed = discord.Embed(
@@ -792,7 +953,7 @@ async def help_command(ctx):
     
     embed.add_field(
         name="🛡️ Admin Commands (Manage Server permission required)",
-        value="```\nn cd list              - Show all active cooldowns\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
+        value="```\nn cd list              - Show all active cooldowns\nn cd db                - Inspect the SQLite database\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
         inline=False
     )
     
@@ -833,22 +994,183 @@ async def ping_slash(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-async def ask_gpt(question_text):
-    if not openai_client:
+def _normalize_quiz_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()
+
+def _extract_quiz_payload(message):
+    chunks = []
+
+    if message.content:
+        chunks.append(message.content)
+
+    for embed in message.embeds:
+        if embed.title:
+            chunks.append(embed.title)
+        if embed.description:
+            chunks.append(embed.description)
+        for field in embed.fields:
+            if field.name:
+                chunks.append(field.name)
+            if field.value:
+                chunks.append(field.value)
+
+    full_text = "\n".join(chunks).strip()
+    options = []
+    numbered_line_re = re.compile(
+        r"^(?:[•\-*]|\d+[\.\):]|[A-C][\.\):]|[1-3]️⃣|:one:|:two:|:three:)\s*(.+)$",
+        re.IGNORECASE,
+    )
+
+    for chunk in chunks:
+        for line in chunk.splitlines():
+            cleaned = line.strip()
+            if not cleaned:
+                continue
+            match = numbered_line_re.match(cleaned)
+            if match:
+                option = re.sub(r"\s+", " ", match.group(1)).strip(" `*_")
+                if option and option not in options:
+                    options.append(option)
+
+    if not options and message.embeds:
+        for embed in message.embeds:
+            for field in embed.fields:
+                field_name = (field.name or "").strip().lower()
+                field_value = (field.value or "").strip()
+                if field_value and (
+                    field_name in {"1", "2", "3", "a", "b", "c"}
+                    or field_name.startswith("option")
+                    or field_name.startswith("answer")
+                ):
+                    if field_value not in options:
+                        options.append(field_value)
+
+    return full_text, options
+
+def _pick_local_quiz_answer(question_text: str, options):
+    if not options:
         return None
+
+    question_tokens = set(_normalize_quiz_text(question_text).split())
+    if not question_tokens:
+        return options[0]
+
+    best_option = options[0]
+    best_score = -1
+
+    for option in options:
+        option_tokens = set(_normalize_quiz_text(option).split())
+        score = len(question_tokens & option_tokens)
+        if score > best_score:
+            best_score = score
+            best_option = option
+
+    return best_option
+
+def _parse_gemini_quiz_response(raw_text: str, options):
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a Naruto expert. For multiple choice questions, respond with ONLY the number (1, 2, or 3) of the correct answer. Do not include any explanation."},
-                {"role": "user", "content": question_text}
-            ],
-            max_tokens=10,
-            timeout=5
-        )
-        return response.choices[0].message.content.strip()
-    except:
+        data = json.loads(raw_text)
+    except Exception:
         return None
+
+    answer_text = str(data.get("answer_text", "")).strip()
+    answer_index = data.get("answer_index")
+
+    if answer_text:
+        for option in options:
+            if _normalize_quiz_text(option) == _normalize_quiz_text(answer_text):
+                return option
+
+    try:
+        answer_index = int(answer_index)
+    except Exception:
+        answer_index = None
+
+    if answer_index is not None and 1 <= answer_index <= len(options):
+        return options[answer_index - 1]
+
+    return None
+
+def _answer_to_option_number(answer_text: str, options):
+    normalized_answer = _normalize_quiz_text(answer_text)
+    for idx, option in enumerate(options, start=1):
+        if _normalize_quiz_text(option) == normalized_answer:
+            return idx
+    return None
+
+async def ask_gpt(question_text, options=None):
+    if not options:
+        return None
+
+    if gemini_client and ENABLE_GPT:
+        try:
+            prompt = (
+                "Pick the correct option for this Naruto Botto quiz.\n"
+                "Return JSON only with answer_index and answer_text.\n"
+                "Rules:\n"
+                "- answer_index must be the 1-based index of one option from the list.\n"
+                "- answer_text must exactly match the chosen option text.\n"
+                "- Do not add explanations.\n\n"
+                f"Question:\n{question_text}\n\n"
+                "Options:\n"
+                + "\n".join(f"{idx + 1}. {option}" for idx, option in enumerate(options))
+            )
+
+            response = await asyncio.to_thread(
+                lambda: gemini_client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=(
+                            "You answer multiple-choice quiz questions. "
+                            "Use only the provided options and return JSON only."
+                        ),
+                        response_mime_type="application/json",
+                        response_schema={
+                            "type": "object",
+                            "properties": {
+                                "answer_index": {
+                                    "type": "integer",
+                                    "description": "1-based index of the chosen option.",
+                                },
+                                "answer_text": {
+                                    "type": "string",
+                                    "description": "Exact text of the chosen option.",
+                                },
+                            },
+                            "required": ["answer_index", "answer_text"],
+                            "additionalProperties": False,
+                        },
+                        temperature=0,
+                        max_output_tokens=64,
+                    ),
+                )
+            )
+
+            parsed = _parse_gemini_quiz_response(response.text, options)
+            if parsed:
+                return _answer_to_option_number(parsed, options)
+        except Exception as e:
+            print(f"❌ Gemini quiz helper failed: {e}")
+
+    local_answer = _pick_local_quiz_answer(question_text, options)
+    if local_answer:
+        return _answer_to_option_number(local_answer, options)
+    return None
+
+async def maybe_answer_quiz(message):
+    if not ENABLE_GPT:
+        return
+
+    full_text, options = _extract_quiz_payload(message)
+    has_question = "?" in full_text or "who" in full_text.lower() or "what" in full_text.lower()
+
+    if not has_question or len(options) < 2:
+        return
+
+    answer = await ask_gpt(full_text, options)
+    if answer:
+        await message.channel.send(str(answer))
 
 keep_alive()
 bot.run(DISCORD_TOKEN)

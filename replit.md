@@ -15,7 +15,7 @@ An enhanced Python Discord bot that serves as an intelligent companion for the N
 
 ### Smart Cooldown Detection ✨
 The bot now intelligently checks if you already have an active cooldown before starting a new timer:
-- When you use `n d` (daily), the bot waits 5 seconds to see if Naruto Botto reports an existing cooldown
+- When you use `n d` (daily), the bot waits about 3.5 seconds to see if Naruto Botto reports an existing cooldown
 - If an existing cooldown is detected, the bot uses that time instead of starting a new timer
 - If no cooldown exists, it starts a fresh timer
 - Works seamlessly with auto-detection from Naruto Botto messages
@@ -76,7 +76,7 @@ All commands use the prefix `n ` (lowercase n followed by a space):
 1. User runs `n d` command
 2. Bot checks if there's already an active cooldown tracked
 3. If yes, shows the existing cooldown with progress bar
-4. If no, bot waits 5 seconds while monitoring Naruto Botto's response
+4. If no, bot waits about 3.5 seconds while monitoring Naruto Botto's response
 5. If Naruto Botto posts a cooldown message, bot captures that time
 6. If no response detected, bot starts a fresh 24-hour timer
 7. User gets pinged in the server channel when cooldown expires
@@ -105,13 +105,13 @@ All commands use the prefix `n ` (lowercase n followed by a space):
 ├── replit.md             # Technical documentation (this file)
 ├── .env.example          # Example environment variables
 ├── .gitignore            # Python gitignore
-└── cooldowns.json        # Persistent cooldown storage (auto-generated)
+└── cooldowns.sqlite3     # Persistent cooldown storage (auto-generated)
 ```
 
 ### Dependencies
 Managed via `requirements.txt`:
 - **discord.py**: Discord API wrapper for bot functionality
-- **openai**: OpenAI API client for GPT quiz answers (optional)
+- **google-genai**: Google Gemini API client for quiz answers (optional)
 - **flask**: Web server for keep-alive functionality
 
 Built-in Python modules:
@@ -128,13 +128,13 @@ Built-in Python modules:
 - `cooldowns`: In-memory storage of active cooldowns
 - `cooldown_colors`: Color coding for different activity types
 - `cooldown_emojis`: Emoji indicators for each activity
-- `save_cooldowns()`: Persists cooldowns to JSON file
-- `load_cooldowns()`: Loads cooldowns from JSON file on startup
+- `save_cooldowns()`: Persists cooldowns to SQLite
+- `load_cooldowns()`: Loads cooldowns from SQLite on startup
 - `get_remaining_time()`: Calculates remaining cooldown time for a user
 
 #### Smart Tracking
 - `track_cooldown_smart()`: Implements intelligent cooldown detection
-- `user_command_tracking`: Tracks user commands for smart detection
+- `pending_smart_tracks`: Tracks pending smart-detection commands
 - Waits for Naruto Botto response before deciding to start new timer
 
 #### Visual Components
@@ -156,10 +156,11 @@ Built-in Python modules:
 - `on_ready()`: Initializes bot, loads saved cooldowns, starts background tasks
 - `on_message()`: Handles both Naruto Botto messages and player commands
 
-#### GPT Integration (Optional)
-- `ask_gpt()`: Sends quiz questions to OpenAI GPT-4o-mini for automatic answers
-- System prompt instructs GPT to answer Naruto trivia concisely
-- Only enabled when `ENABLE_GPT=true` environment variable is set
+#### Gemini Integration (Optional)
+- `ask_gpt()`: Sends quiz questions to Gemini for automatic answers
+- System prompt instructs Gemini to return only the chosen option
+- Uses the free-tier Gemini API key from Google AI Studio when `GEMINI_API_KEY` is set
+- Falls back to a local heuristic when no Gemini key is present
 
 #### Keep-Alive System
 - Flask web server runs on port 8080 in a separate thread
@@ -168,8 +169,11 @@ Built-in Python modules:
 
 ## Environment Variables
 - `DISCORD_TOKEN`: Discord bot token (required)
-- `OPENAI_API_KEY`: OpenAI API key for quiz answers (optional)
+- `GEMINI_API_KEY`: Gemini API key for quiz answers (optional)
+- `GEMINI_MODEL`: Gemini model for quiz answers (optional, default: `gemini-2.5-flash-lite`)
 - `ENABLE_GPT`: Set to "true" to enable quiz auto-answer feature (optional, default: false)
+- `SMART_TRACK_WAIT_SECONDS`: Delay before starting a fresh cooldown when waiting for Naruto Botto's reply (optional, default: `3.5`)
+- `NARUTO_BOTTO_USER_ID`: Optional exact user ID for Naruto Botto to improve message detection
 
 ## Setup Instructions
 
@@ -185,7 +189,9 @@ Built-in Python modules:
 
 2. **Environment Setup**:
    - Add `DISCORD_TOKEN` secret with your Discord bot token
-   - Optionally add `OPENAI_API_KEY` secret for quiz features
+   - Optionally add `GEMINI_API_KEY` secret for quiz features
+   - Optionally set `NARUTO_BOTTO_USER_ID` for more reliable detection
+   - Optionally set `SMART_TRACK_WAIT_SECONDS=3.5` if you want a longer grace period
    - Optionally set `ENABLE_GPT=true` to enable quiz auto-answer
 
 3. **Running the Bot**:
@@ -212,12 +218,12 @@ Built-in Python modules:
 - Admin commands: Added cooldown list, user check, and clear commands
 - Better messaging: Fun, engaging Naruto-themed messages
 - Improved data model: Cooldowns track channel IDs for proper notifications
-- GPT made optional: Set ENABLE_GPT environment variable
+- Quiz AI made optional: Set ENABLE_GPT environment variable
 - Error handling: Graceful handling of API errors
 
 ### 2025-11-07: Initial Release
 - Created main bot.py with cooldown tracking system
-- Integrated OpenAI for quiz auto-answers
+- Integrated Gemini for quiz auto-answers
 - Added persistent cooldown storage
 - Set up workflow for continuous bot operation
 - Configured Python dependencies
@@ -225,8 +231,8 @@ Built-in Python modules:
 ## User Preferences
 - Language: Python 3.11
 - Framework: discord.py
-- AI Model: GPT-4o-mini (lightweight, fast responses)
-- Storage: JSON file-based persistence
+- AI Model: Gemini 2.5 Flash-Lite
+- Storage: SQLite-based persistence
 - Deployment: Replit with VM deployment for 24/7 operation
 - UI Style: Rich Discord embeds with visual indicators
 

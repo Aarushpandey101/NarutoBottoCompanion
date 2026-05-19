@@ -1,4 +1,5 @@
 from flask import Flask
+import os
 from threading import Thread
 import logging
 
@@ -14,7 +15,8 @@ def home():
 
 def run():
     try:
-        app.run(host='0.0.0.0', port=8080, use_reloader=False)
+        port = int(os.environ.get("PORT", "8080"))
+        app.run(host='0.0.0.0', port=port, use_reloader=False)
     except OSError:
         pass
 
