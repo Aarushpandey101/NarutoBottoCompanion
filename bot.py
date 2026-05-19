@@ -1030,62 +1030,85 @@ def quiz_log(message: str):
 
 def _extract_quiz_payload(message):
     chunks = []
-
-    if message.content:
-        chunks.append(message.content)
-
-    for embed in message.embeds:
-        if embed.title:
-            chunks.append(embed.title)
-        if embed.description:
-            chunks.append(embed.description)
-        for field in embed.fields:
-            if field.name:
-                chunks.append(field.name)
-            if field.value:
-                chunks.append(field.value)
-
-    full_text = "\n".join(chunks).strip()
     options = []
+    question_bits = []
+    title_bits = []
+
+    option_label_re = re.compile(r"^(?:\d+|[1-3]️⃣|:one:|:two:|:three:|[A-C])$", re.IGNORECASE)
     numbered_line_re = re.compile(
         r"^(?:[•\-*]|\d+[\.\):]|[A-C][\.\):]|[1-3]️⃣|:one:|:two:|:three:)\s*(.+)$",
         re.IGNORECASE,
     )
+    noise_line_re = re.compile(
+        r"^(?:you earned|correct answer|answer|result|rewards?|mission|rank|cooldown|time left|next run|dattebayo|congratul|completed?)",
+        re.IGNORECASE,
+    )
 
-    for chunk in chunks:
-        for line in chunk.splitlines():
-            cleaned = line.strip()
-            if not cleaned:
+    def add_option(option_text: str):
+        option = re.sub(r"\s+", " ", option_text).strip(" `*_")
+        if option and option not in options:
+            options.append(option)
+
+    def add_question_text(text: str):
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if cleaned and not noise_line_re.match(cleaned):
+            question_bits.append(cleaned)
+
+    if message.content:
+        chunks.append(message.content)
+        for line in message.content.splitlines():
+            line = line.strip()
+            if not line:
                 continue
-            match = numbered_line_re.match(cleaned)
+            match = numbered_line_re.match(line)
             if match:
-                option = re.sub(r"\s+", " ", match.group(1)).strip(" `*_")
-                if option and option not in options:
-                    options.append(option)
+                add_option(match.group(1))
+            else:
+                add_question_text(line)
 
-    if not options and message.embeds:
-        for embed in message.embeds:
-            for field in embed.fields:
-                field_name = (field.name or "").strip().lower()
-                field_value = (field.value or "").strip()
-                if field_value and (
-                    field_name in {"1", "2", "3", "a", "b", "c"}
-                    or field_name.startswith("option")
-                    or field_name.startswith("answer")
-                ):
-                    if field_value not in options:
-                        options.append(field_value)
+    for embed in message.embeds:
+        if embed.title:
+            title_bits.append(embed.title.strip())
+        if embed.description:
+            chunks.append(embed.description)
+            for line in embed.description.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                match = numbered_line_re.match(line)
+                if match:
+                    add_option(match.group(1))
+                else:
+                    add_question_text(line)
+        for field in embed.fields:
+            field_name = (field.name or "").strip()
+            field_value = (field.value or "").strip()
 
-    embed_title = ""
-    if message.embeds and message.embeds[0].title:
-        embed_title = message.embeds[0].title[:80]
+            if field_name and option_label_re.match(field_name):
+                if field_value:
+                    add_option(field_value)
+                continue
+
+            if field_value:
+                match = numbered_line_re.match(field_value)
+                if match:
+                    add_option(match.group(1))
+                else:
+                    add_question_text(field_value)
+
+            if field_name:
+                add_question_text(field_name)
+
+    full_text = "\n".join(chunks + title_bits + question_bits).strip()
+    question_text = " ".join(title_bits + question_bits).strip()
 
     quiz_log(
         "Extracted payload "
-        f"title={embed_title!r} "
-        f"text={full_text[:240]!r} options={options!r}"
+        f"title={title_bits[:1]!r} "
+        f"question={question_text[:240]!r} "
+        f"options={options!r}"
     )
-    return full_text, options
+    return question_text or full_text, options
 
 def _pick_local_quiz_answer(question_text: str, options):
     if not options:
