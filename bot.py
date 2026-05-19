@@ -113,7 +113,17 @@ def is_naruto_botto_author(author) -> bool:
     if NARUTO_BOTTO_USER_ID and getattr(author, "id", None) == NARUTO_BOTTO_USER_ID:
         return True
 
-    author_name = f"{getattr(author, 'name', '')} {getattr(author, 'display_name', '')}".lower()
+    author_name = " ".join(
+        str(value)
+        for value in [
+            getattr(author, "name", ""),
+            getattr(author, "display_name", ""),
+            getattr(author, "global_name", ""),
+            getattr(author, "nick", ""),
+            getattr(author, "username", ""),
+        ]
+        if value
+    ).lower()
     return "naruto botto" in author_name
 
 def cooldown_row_to_dict(row):
@@ -416,6 +426,20 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+
+    if QUIZ_DEBUG and message.author.bot:
+        author_bits = [
+            f"id={getattr(message.author, 'id', None)}",
+            f"name={getattr(message.author, 'name', None)!r}",
+            f"display_name={getattr(message.author, 'display_name', None)!r}",
+            f"global_name={getattr(message.author, 'global_name', None)!r}",
+            f"nick={getattr(message.author, 'nick', None)!r}",
+            f"bot={getattr(message.author, 'bot', None)}",
+            f"is_naruto={is_naruto_botto_author(message.author)}",
+            f"embeds={len(message.embeds)}",
+            f"content={message.content[:120]!r}",
+        ]
+        print("[QUIZ] Bot message seen: " + " | ".join(author_bits))
     
     if message.author.bot and is_naruto_botto_author(message.author):
         full_text = message.content
@@ -430,6 +454,7 @@ async def on_message(message):
                     full_text += f"\n{field.name}: {field.value}"
         
         print(f"🔍 Naruto Botto message detected: {full_text[:200]}")
+        quiz_log("Naruto Botto message passed the author filter.")
         
         if pending_smart_tracks:
             time_secs = parse_time_string(full_text)
@@ -1192,7 +1217,9 @@ async def maybe_answer_quiz(message):
     )
 
     if not has_question or len(options) < 2:
-        quiz_log("Skipping because the message does not look like a quiz prompt.")
+        quiz_log(
+            "Skipping because the message does not look like a quiz prompt or options were missing."
+        )
         return
 
     answer = await ask_gpt(full_text, options)
