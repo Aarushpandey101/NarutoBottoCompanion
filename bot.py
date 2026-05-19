@@ -20,6 +20,8 @@ ENABLE_GPT = os.getenv("ENABLE_GPT", "false").lower() == "true"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 SMART_TRACK_WAIT_SECONDS = float(os.getenv("SMART_TRACK_WAIT_SECONDS", "3.5"))
+QUIZ_ALLOW_LOCAL_FALLBACK = os.getenv("QUIZ_ALLOW_LOCAL_FALLBACK", "false").lower() == "true"
+QUIZ_DEBUG = os.getenv("QUIZ_DEBUG", "false").lower() == "true"
 NARUTO_BOTTO_USER_ID = None
 
 try:
@@ -997,6 +999,10 @@ async def ping_slash(interaction: discord.Interaction):
 def _normalize_quiz_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text.lower())).strip()
 
+def quiz_log(message: str):
+    if QUIZ_DEBUG:
+        print(f"[QUIZ] {message}")
+
 def _extract_quiz_payload(message):
     chunks = []
 
@@ -1045,6 +1051,15 @@ def _extract_quiz_payload(message):
                     if field_value not in options:
                         options.append(field_value)
 
+    embed_title = ""
+    if message.embeds and message.embeds[0].title:
+        embed_title = message.embeds[0].title[:80]
+
+    quiz_log(
+        "Extracted payload "
+        f"title={embed_title!r} "
+        f"text={full_text[:240]!r} options={options!r}"
+    )
     return full_text, options
 
 def _pick_local_quiz_answer(question_text: str, options):
@@ -1091,25 +1106,24 @@ def _parse_gemini_quiz_response(raw_text: str, options):
 
     return None
 
-def _answer_to_option_number(answer_text: str, options):
-    normalized_answer = _normalize_quiz_text(answer_text)
-    for idx, option in enumerate(options, start=1):
-        if _normalize_quiz_text(option) == normalized_answer:
-            return idx
-    return None
-
 async def ask_gpt(question_text, options=None):
     if not options:
+        quiz_log("Skipping Gemini call because no options were detected.")
         return None
 
     if gemini_client and ENABLE_GPT:
         try:
+            quiz_log(
+                f"Sending question to Gemini. question={question_text[:240]!r} options={options!r}"
+            )
             prompt = (
                 "Pick the correct option for this Naruto Botto quiz.\n"
                 "Return JSON only with answer_index and answer_text.\n"
                 "Rules:\n"
                 "- answer_index must be the 1-based index of one option from the list.\n"
                 "- answer_text must exactly match the chosen option text.\n"
+                "- The answer must be based on Naruto knowledge, not text similarity.\n"
+                "- If the question is asking for a specific Naruto fact, choose the factual option.\n"
                 "- Do not add explanations.\n\n"
                 f"Question:\n{question_text}\n\n"
                 "Options:\n"
@@ -1147,15 +1161,24 @@ async def ask_gpt(question_text, options=None):
                 )
             )
 
+            quiz_log(f"Gemini raw response: {response.text[:240]!r}")
             parsed = _parse_gemini_quiz_response(response.text, options)
             if parsed:
-                return _answer_to_option_number(parsed, options)
+                quiz_log(f"Gemini parsed answer: {parsed!r}")
+                return options.index(parsed) + 1
+            quiz_log("Gemini response could not be mapped to one of the supplied options.")
         except Exception as e:
             print(f"❌ Gemini quiz helper failed: {e}")
 
-    local_answer = _pick_local_quiz_answer(question_text, options)
-    if local_answer:
-        return _answer_to_option_number(local_answer, options)
+    if QUIZ_ALLOW_LOCAL_FALLBACK:
+        quiz_log("Using local fallback because QUIZ_ALLOW_LOCAL_FALLBACK=true.")
+        local_answer = _pick_local_quiz_answer(question_text, options)
+        if local_answer and local_answer in options:
+            quiz_log(f"Local fallback selected: {local_answer!r}")
+            return options.index(local_answer) + 1
+        quiz_log("Local fallback could not find a confident answer.")
+    else:
+        quiz_log("No fallback allowed; skipping answer.")
     return None
 
 async def maybe_answer_quiz(message):
@@ -1164,13 +1187,20 @@ async def maybe_answer_quiz(message):
 
     full_text, options = _extract_quiz_payload(message)
     has_question = "?" in full_text or "who" in full_text.lower() or "what" in full_text.lower()
+    quiz_log(
+        f"Detection check has_question={has_question} options={len(options)} text={full_text[:240]!r}"
+    )
 
     if not has_question or len(options) < 2:
+        quiz_log("Skipping because the message does not look like a quiz prompt.")
         return
 
     answer = await ask_gpt(full_text, options)
     if answer:
+        quiz_log(f"Sending answer number: {answer}")
         await message.channel.send(str(answer))
+    else:
+        quiz_log("No answer sent.")
 
 keep_alive()
 bot.run(DISCORD_TOKEN)

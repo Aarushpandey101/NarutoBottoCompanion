@@ -172,6 +172,8 @@ Built-in Python modules:
 - `GEMINI_API_KEY`: Gemini API key for quiz answers (optional)
 - `GEMINI_MODEL`: Gemini model for quiz answers (optional, default: `gemini-2.5-flash-lite`)
 - `ENABLE_GPT`: Set to "true" to enable quiz auto-answer feature (optional, default: false)
+- `QUIZ_ALLOW_LOCAL_FALLBACK`: Set to "true" only if you want the bot to guess when Gemini fails
+- `QUIZ_DEBUG`: Set to "true" to print quiz-detection logs in the bot console
 - `SMART_TRACK_WAIT_SECONDS`: Delay before starting a fresh cooldown when waiting for Naruto Botto's reply (optional, default: `3.5`)
 - `NARUTO_BOTTO_USER_ID`: Optional exact user ID for Naruto Botto to improve message detection
 

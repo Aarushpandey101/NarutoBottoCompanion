@@ -26,6 +26,8 @@ Click the Secrets tab (🔒) and add:
 - `DISCORD_TOKEN` - Your Discord bot token (required)
 - `GEMINI_API_KEY` - Your Gemini API key from Google AI Studio (optional, for quiz feature)
 - `ENABLE_GPT` - Set to `true` to enable quiz auto-answer (optional)
+- `QUIZ_ALLOW_LOCAL_FALLBACK` - Set to `true` only if you want the bot to guess when Gemini fails
+- `QUIZ_DEBUG` - Set to `true` to print quiz-detection logs in the bot console
 - `NARUTO_BOTTO_USER_ID` - Optional Naruto Botto user ID for more reliable detection
 - `SMART_TRACK_WAIT_SECONDS` - Optional smart-detection delay in seconds, default `3.5`
 
