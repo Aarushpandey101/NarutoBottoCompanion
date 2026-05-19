@@ -427,7 +427,7 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    if QUIZ_DEBUG and message.author.bot:
+    if QUIZ_DEBUG and (message.author.bot or message.embeds):
         author_bits = [
             f"id={getattr(message.author, 'id', None)}",
             f"name={getattr(message.author, 'name', None)!r}",
@@ -439,8 +439,13 @@ async def on_message(message):
             f"embeds={len(message.embeds)}",
             f"content={message.content[:120]!r}",
         ]
-        print("[QUIZ] Bot message seen: " + " | ".join(author_bits))
-    
+        print("[QUIZ] Message seen: " + " | ".join(author_bits), flush=True)
+
+    # Quiz handling should not depend on the bot-name filter; some bot/app
+    # messages do not present a stable author name even though they are valid quiz embeds.
+    if ENABLE_GPT and message.embeds and message.author != bot.user:
+        await maybe_answer_quiz(message)
+
     if message.author.bot and is_naruto_botto_author(message.author):
         full_text = message.content
         
@@ -579,33 +584,44 @@ async def on_message(message):
                     print(f"✅ Auto-tracked {detected} cooldown for {user.display_name}")
             return
         
-        await maybe_answer_quiz(message)
         return
     
     await bot.process_commands(message)
 
 @bot.command(name="m", aliases=["mission"])
 async def track_mission(ctx):
+    if QUIZ_DEBUG:
+        print(f"[CMD] {ctx.author} ran mission in #{getattr(ctx.channel, 'name', 'unknown')}", flush=True)
     await track_cooldown_smart(ctx, "mission")
 
 @bot.command(name="r", aliases=["report"])
 async def track_report(ctx):
+    if QUIZ_DEBUG:
+        print(f"[CMD] {ctx.author} ran report in #{getattr(ctx.channel, 'name', 'unknown')}", flush=True)
     await track_cooldown_smart(ctx, "report")
 
 @bot.command(name="to", aliases=["tower"])
 async def track_tower(ctx):
+    if QUIZ_DEBUG:
+        print(f"[CMD] {ctx.author} ran tower in #{getattr(ctx.channel, 'name', 'unknown')}", flush=True)
     await track_cooldown_smart(ctx, "tower")
 
 @bot.command(name="d", aliases=["daily"])
 async def track_daily(ctx):
+    if QUIZ_DEBUG:
+        print(f"[CMD] {ctx.author} ran daily in #{getattr(ctx.channel, 'name', 'unknown')}", flush=True)
     await track_cooldown_smart(ctx, "daily")
 
 @bot.command(name="w", aliases=["weekly"])
 async def track_weekly(ctx):
+    if QUIZ_DEBUG:
+        print(f"[CMD] {ctx.author} ran weekly in #{getattr(ctx.channel, 'name', 'unknown')}", flush=True)
     await track_cooldown_smart(ctx, "weekly")
 
 @bot.command(name="ch", aliases=["challenge"])
 async def track_challenge(ctx):
+    if QUIZ_DEBUG:
+        print(f"[CMD] {ctx.author} ran challenge in #{getattr(ctx.channel, 'name', 'unknown')}", flush=True)
     await track_cooldown_smart(ctx, "challenge")
 
 async def track_cooldown_smart(ctx, cmd):
@@ -1026,7 +1042,7 @@ def _normalize_quiz_text(text: str) -> str:
 
 def quiz_log(message: str):
     if QUIZ_DEBUG:
-        print(f"[QUIZ] {message}")
+        print(f"[QUIZ] {message}", flush=True)
 
 def _extract_quiz_payload(message):
     chunks = []
