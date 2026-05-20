@@ -1284,7 +1284,10 @@ async def maybe_answer_quiz(message):
     answer = await ask_gpt(full_text, options)
     if answer:
         quiz_log(f"Sending answer number: {answer}")
-        await message.channel.send(str(answer))
+        try:
+            await message.reply(f"Answer: {answer}", mention_author=False)
+        except Exception:
+            await message.channel.send(f"Answer: {answer}")
     else:
         quiz_log("No answer sent.")
 
