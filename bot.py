@@ -1098,7 +1098,7 @@ def quiz_log(message: str):
 
 class QuizAnswer(BaseModel):
     answer_index: int
-    answer_text: str
+    answer_text: Optional[str] = None
 
 def _quiz_options_text(options):
     return "\n".join(options)
@@ -1396,19 +1396,14 @@ def _pick_local_quiz_answer(question_text: str, options):
     return best_option
 
 def _build_quiz_prompt(question_text: str, options):
-    return (
-        "Pick the correct option for this Naruto Botto quiz.\n"
-        "Return JSON only with answer_index and answer_text.\n"
-        "Rules:\n"
-        "- answer_index must be the 1-based index of one option from the list.\n"
-        "- answer_text must exactly match the chosen option text.\n"
-        "- The answer must be based on Naruto knowledge, not text similarity.\n"
-        "- If the question is asking for a specific Naruto fact, choose the factual option.\n"
-        "- Do not add explanations.\n\n"
-        f"Question:\n{question_text}\n\n"
-        "Options:\n"
-        + "\n".join(f"{idx + 1}. {option}" for idx, option in enumerate(options))
-    )
+    lines = [
+        "Choose the correct option.",
+        'Return JSON: {"answer_index": 1}',
+        "Use Naruto canon, not text similarity or guessing.",
+        f"Q: {question_text}",
+    ]
+    lines.extend(f"{idx + 1}. {option}" for idx, option in enumerate(options))
+    return "\n".join(lines)
 
 def _call_chat_completion(endpoint: str, api_key: str, model: str, question_text: str, options, provider_name: str, extra_headers=None):
     payload = {
@@ -1416,10 +1411,7 @@ def _call_chat_completion(endpoint: str, api_key: str, model: str, question_text
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "You answer multiple-choice quiz questions. "
-                    "Use only the provided options and return JSON only."
-                ),
+                "content": "Return JSON only with answer_index. Use Naruto canon.",
             },
             {
                 "role": "user",
@@ -1427,7 +1419,7 @@ def _call_chat_completion(endpoint: str, api_key: str, model: str, question_text
             },
         ],
         "temperature": 0,
-        "max_completion_tokens": 64,
+        "max_completion_tokens": 12,
     }
 
     headers = {
@@ -1466,10 +1458,12 @@ def _extract_provider_answer(raw_text: str, options):
 
     parsed = QuizAnswer.model_validate_json(cleaned)
     answer_index = _normalize_answer_index(parsed.answer_index, options)
-    answer_text = str(parsed.answer_text).strip()
+    answer_text = str(parsed.answer_text).strip() if parsed.answer_text is not None else ""
 
     if answer_index is not None:
-        return answer_index, answer_text
+        if answer_text:
+            return answer_index, answer_text
+        return answer_index, options[answer_index - 1]
 
     for idx, option in enumerate(options, start=1):
         if _normalize_quiz_text(option) == _normalize_quiz_text(answer_text):
@@ -1487,15 +1481,12 @@ async def _ask_groq(question_text: str, options):
         messages=[
             {
                 "role": "system",
-                "content": (
-                    "You answer multiple-choice quiz questions. "
-                    "Use only the provided options and return JSON only."
-                ),
+                "content": "Return JSON only with answer_index. Use Naruto canon.",
             },
             {"role": "user", "content": prompt},
         ],
         temperature=0,
-        max_tokens=64,
+        max_tokens=12,
     )
     raw_text = response.choices[0].message.content or ""
     quiz_log(f"Groq raw response: {raw_text[:240]!r}")
@@ -1513,12 +1504,11 @@ async def _ask_gemini(question_text: str, options):
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=(
-                    "You answer multiple-choice quiz questions. "
-                    "Use only the provided options and return JSON only."
+                    "Return JSON only with answer_index. Use Naruto canon."
                 ),
                 response_mime_type="application/json",
                 temperature=0,
-                max_output_tokens=64,
+                max_output_tokens=12,
             ),
         )
     )
