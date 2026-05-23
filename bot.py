@@ -1103,10 +1103,15 @@ async def quiz_temp(ctx, limit: int = 5):
 
 @quiz_group.command(name="confirm", aliases=["save"])
 @commands.has_permissions(manage_guild=True)
-async def quiz_confirm(ctx, candidate_id: int):
-    candidate = _quiz_get_review_candidate_by_id(candidate_id)
+async def quiz_confirm(ctx, candidate_ref: str):
+    candidate, error = _quiz_resolve_review_candidate_reference(candidate_ref)
+    if error == "ambiguous":
+        await ctx.send(
+            f"❌ Ref `{candidate_ref}` matches multiple questions. Use `n quiz temp` and copy the full candidate id instead."
+        )
+        return
     if not candidate:
-        await ctx.send(f"❌ No temporary quiz candidate found for id `{candidate_id}`.")
+        await ctx.send(f"❌ No temporary quiz candidate found for `{candidate_ref}`.")
         return
 
     options = candidate["options_text"].split("\n")
@@ -1120,19 +1125,24 @@ async def quiz_confirm(ctx, candidate_id: int):
     )
     _quiz_delete_review_candidates_for_key(candidate["question_key"])
     quiz_log(
-        f"Manually confirmed quiz candidate id={candidate_id} question_key={candidate['question_key'][:10]} answer={candidate['answer_index']}"
+        f"Manually confirmed quiz candidate id={candidate['id']} question_key={candidate['question_key'][:10]} answer={candidate['answer_index']}"
     )
 
     await ctx.send(
-        f"✅ Saved candidate `{candidate_id}` as permanent answer **{candidate['answer_index']}** and cleared the temp queue for that question."
+        f"✅ Saved candidate `{candidate['id']}` as permanent answer **{candidate['answer_index']}** and cleared the temp queue for that question."
     )
 
 @quiz_group.command(name="delete", aliases=["reject", "remove", "purge"])
 @commands.has_permissions(manage_guild=True)
-async def quiz_delete(ctx, candidate_id: int, scope: str = None):
-    candidate = _quiz_get_review_candidate_by_id(candidate_id)
+async def quiz_delete(ctx, candidate_ref: str, scope: str = None):
+    candidate, error = _quiz_resolve_review_candidate_reference(candidate_ref)
+    if error == "ambiguous":
+        await ctx.send(
+            f"❌ Ref `{candidate_ref}` matches multiple questions. Use `n quiz temp` and copy the full candidate id instead."
+        )
+        return
     if not candidate:
-        await ctx.send(f"❌ No temporary quiz candidate found for id `{candidate_id}`.")
+        await ctx.send(f"❌ No temporary quiz candidate found for `{candidate_ref}`.")
         return
 
     scope_value = (scope or "").strip().lower()
@@ -1143,8 +1153,8 @@ async def quiz_delete(ctx, candidate_id: int, scope: str = None):
             f"🗑️ Deleted **{removed}** temp candidate(s) for that question."
         )
     else:
-        _quiz_delete_review_candidate(candidate_id)
-        await ctx.send(f"🗑️ Deleted temp candidate `{candidate_id}`.")
+        _quiz_delete_review_candidate(candidate["id"])
+        await ctx.send(f"🗑️ Deleted temp candidate `{candidate['id']}`.")
 
 @bot.command(name="help", aliases=["commands", "h"])
 async def help_command(ctx):
@@ -1394,6 +1404,36 @@ def _quiz_get_review_candidate_by_id(candidate_id: int):
         ).fetchone()
     return row
 
+def _quiz_resolve_review_candidate_reference(candidate_ref: str):
+    ref = str(candidate_ref or "").strip()
+    if not ref:
+        return None, "empty"
+
+    if ref.isdigit():
+        candidate = _quiz_get_review_candidate_by_id(int(ref))
+        return candidate, None if candidate else "not_found"
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, question_key, question_text, options_text, answer_index, answer_text, provider, seen_count, first_seen_at, last_seen_at
+            FROM quiz_review_candidates
+            WHERE question_key LIKE ?
+            ORDER BY last_seen_at DESC, id DESC
+            """,
+            (f"{ref}%",),
+        ).fetchall()
+
+    if not rows:
+        return None, "not_found"
+
+    question_keys = {row["question_key"] for row in rows}
+    if len(question_keys) > 1:
+        return rows, "ambiguous"
+
+    return rows[0], None
+
 def _quiz_delete_review_candidates_for_key(question_key: str):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM quiz_review_candidates WHERE question_key = ?", (question_key,))
@@ -1415,6 +1455,21 @@ def _quiz_text_from_provider_response(raw_text: str):
     if raw_text.startswith("```"):
         raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
         raw_text = re.sub(r"\s*```$", "", raw_text)
+
+    # OpenRouter and other OpenAI-compatible providers often return a full
+    # chat.completion envelope. Unwrap the assistant message content first.
+    if raw_text.startswith("{") and '"choices"' in raw_text:
+        try:
+            payload = json.loads(raw_text)
+            choices = payload.get("choices") or []
+            if choices:
+                message = choices[0].get("message") or {}
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    raw_text = content.strip()
+        except Exception:
+            pass
+
     start = raw_text.find("{")
     end = raw_text.rfind("}")
     if start != -1 and end != -1 and end > start:
