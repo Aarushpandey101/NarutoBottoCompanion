@@ -1158,9 +1158,9 @@ async def track_cooldown_smart(ctx, cmd):
 
 @bot.command(name="dashboard", aliases=["db", "status"])
 async def dashboard(ctx, *, member_ref: str = None):
+    load_cooldowns()
     member = await _resolve_member_reference(ctx, member_ref)
-    
-    user_rows = _get_cooldowns_from_db(member.id)
+    user_rows = list(cooldowns.get(member.id, {}).values())
     if not user_rows:
         embed = discord.Embed(
             title=f"🎌 {member.display_name}'s Dashboard",
@@ -1281,6 +1281,7 @@ async def list_cooldowns(ctx):
 
 @cooldown_group.command(name="user", aliases=["check", "u"])
 async def check_user(ctx, *, member_ref: str = None):
+    load_cooldowns()
     member = await _resolve_member_reference(ctx, member_ref)
     
     user_cooldowns = cooldowns.get(member.id, {})
