@@ -7,4 +7,5 @@ dependencies = [
     "discord-py>=2.6.4",
     "flask>=3.0.0",
     "google-genai>=1.0.0",
+    "groq>=0.13.0",
 ]

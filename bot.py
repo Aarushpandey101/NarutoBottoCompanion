@@ -19,6 +19,11 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
+try:
+    from groq import AsyncGroq
+except Exception:
+    AsyncGroq = None
+
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 ENABLE_GPT = os.getenv("ENABLE_GPT", "false").lower() == "true"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -27,7 +32,7 @@ SMART_TRACK_WAIT_SECONDS = float(os.getenv("SMART_TRACK_WAIT_SECONDS", "3.5"))
 QUIZ_ALLOW_LOCAL_FALLBACK = os.getenv("QUIZ_ALLOW_LOCAL_FALLBACK", "false").lower() == "true"
 QUIZ_DEBUG = os.getenv("QUIZ_DEBUG", "false").lower() == "true"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 NARUTO_BOTTO_USER_ID = None
@@ -45,6 +50,13 @@ if GEMINI_API_KEY:
         gemini_client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as e:
         print(f"❌ Failed to initialize Gemini client: {e}")
+
+groq_client = None
+if GROQ_API_KEY and AsyncGroq is not None:
+    try:
+        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+    except Exception as e:
+        print(f"Failed to initialize Groq client: {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -1466,18 +1478,28 @@ def _extract_provider_answer(raw_text: str, options):
     raise ValueError("provider response did not match supplied options")
 
 async def _ask_groq(question_text: str, options):
-    if not GROQ_API_KEY:
+    if not groq_client:
         return None
-    raw = await asyncio.to_thread(
-        _call_chat_completion,
-        "https://api.groq.com/openai/v1/chat/completions",
-        GROQ_API_KEY,
-        GROQ_MODEL,
-        question_text,
-        options,
-        "Groq",
+    quiz_log(f"Sending question to Groq. question={question_text[:240]!r} options={options!r}")
+    prompt = _build_quiz_prompt(question_text, options)
+    response = await groq_client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You answer multiple-choice quiz questions. "
+                    "Use only the provided options and return JSON only."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0,
+        max_tokens=64,
     )
-    return _extract_provider_answer(raw, options)
+    raw_text = response.choices[0].message.content or ""
+    quiz_log(f"Groq raw response: {raw_text[:240]!r}")
+    return _extract_provider_answer(raw_text, options)
 
 async def _ask_gemini(question_text: str, options):
     if not gemini_client or not GEMINI_API_KEY:
