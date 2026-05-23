@@ -244,6 +244,24 @@ cooldown_colors = {
 
 cooldowns = {}
 pending_smart_tracks = {}
+challenge_confirmation_states = {}
+CHALLENGE_PENDING_TTL_SECONDS = 120
+
+
+def _cleanup_stale_challenge_state():
+    now = time.time()
+    stale_users = []
+
+    for user_id, state in list(challenge_confirmation_states.items()):
+        if now - float(state.get("timestamp", 0)) > CHALLENGE_PENDING_TTL_SECONDS:
+            stale_users.append(user_id)
+
+    for user_id in stale_users:
+        challenge_confirmation_states.pop(user_id, None)
+        if user_id in pending_smart_tracks and "challenge" in pending_smart_tracks[user_id]:
+            pending_smart_tracks[user_id].pop("challenge", None)
+            if not pending_smart_tracks[user_id]:
+                pending_smart_tracks.pop(user_id, None)
 
 def init_database():
     with sqlite3.connect(DB_PATH) as conn:
@@ -668,6 +686,8 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
+    _cleanup_stale_challenge_state()
+
     if QUIZ_DEBUG and (message.author.bot or message.embeds):
         author_bits = [
             f"id={getattr(message.author, 'id', None)}",
@@ -898,6 +918,12 @@ async def track_cooldown_smart(ctx, cmd):
     if user_id not in pending_smart_tracks:
         pending_smart_tracks[user_id] = {}
 
+    if cmd == "challenge":
+        challenge_confirmation_states[user_id] = {
+            "channel_id": ctx.channel.id,
+            "timestamp": time.time(),
+        }
+
     track_event = asyncio.Event()
     pending_smart_tracks[user_id][cmd] = {
         "channel_id": ctx.channel.id,
@@ -918,6 +944,18 @@ async def track_cooldown_smart(ctx, cmd):
         pass
     
     if user_id in pending_smart_tracks and cmd in pending_smart_tracks[user_id]:
+        if cmd == "challenge":
+            challenge_confirmation_states[user_id] = {
+                "channel_id": ctx.channel.id,
+                "timestamp": time.time(),
+                "waiting": True,
+            }
+            print("⏰ Challenge prompt seen; waiting for a confirmed challenge cooldown message instead")
+            await ctx.send(
+                "🥊 Challenge prompt detected. I’ll only sync this if Naruto Botto sends the actual accepted challenge cooldown message."
+            )
+            return
+
         print(f"⏰ No Naruto Botto response detected, starting fresh timer for {cmd}")
         
         del pending_smart_tracks[user_id][cmd]
