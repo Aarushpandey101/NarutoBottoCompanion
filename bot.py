@@ -263,6 +263,16 @@ def _cleanup_stale_challenge_state():
             if not pending_smart_tracks[user_id]:
                 pending_smart_tracks.pop(user_id, None)
 
+
+def _start_challenge_cooldown(user_id: int, channel_id: int, source: str = "accepted"):
+    cooldowns.setdefault(user_id, {})["challenge"] = {
+        "expires_at": time.time() + cooldown_times["challenge"],
+        "channel_id": channel_id,
+        "notified": False,
+    }
+    save_cooldowns()
+    quiz_log(f"Challenge cooldown synced from {source} for user_id={user_id} channel_id={channel_id}")
+
 def init_database():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -317,7 +327,40 @@ def init_database():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_quiz_review_candidates_question_key ON quiz_review_candidates(question_key)"
         )
+    _dedupe_cooldowns_table()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_cooldowns_user_command ON cooldowns(user_id, command)"
+        )
     _migrate_quiz_cache_keys_to_question_only()
+
+def _dedupe_cooldowns_table():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT rowid, user_id, command, expires_at, channel_id, notified
+            FROM cooldowns
+            ORDER BY user_id ASC, command ASC, expires_at DESC, rowid DESC
+            """
+        ).fetchall()
+
+        best_rows = {}
+        duplicate_rowids = []
+
+        for row in rows:
+            key = (int(row["user_id"]), str(row["command"]))
+            if key not in best_rows:
+                best_rows[key] = row
+            else:
+                duplicate_rowids.append(int(row["rowid"]))
+
+        if duplicate_rowids:
+            conn.executemany(
+                "DELETE FROM cooldowns WHERE rowid = ?",
+                [(rowid,) for rowid in duplicate_rowids],
+            )
+            print(f"🧹 Deduped {len(duplicate_rowids)} cooldown row(s) in persistent storage", flush=True)
 
 def _migrate_quiz_cache_keys_to_question_only():
     with sqlite3.connect(DB_PATH) as conn:
@@ -707,6 +750,32 @@ async def on_message(message):
     if ENABLE_GPT and message.embeds and message.author != bot.user:
         await maybe_answer_quiz(message)
 
+    if not message.author.bot:
+        challenge_state = challenge_confirmation_states.get(message.author.id)
+        if challenge_state and message.channel.id == challenge_state.get("channel_id"):
+            content = (message.content or "").strip().lower()
+            if content in {"y", "yes"}:
+                challenge_confirmation_states.pop(message.author.id, None)
+                if message.author.id in pending_smart_tracks and "challenge" in pending_smart_tracks[message.author.id]:
+                    pending_smart_tracks[message.author.id].pop("challenge", None)
+                    if not pending_smart_tracks[message.author.id]:
+                        pending_smart_tracks.pop(message.author.id, None)
+                _start_challenge_cooldown(message.author.id, message.channel.id, source="user_accept")
+                try:
+                    await message.channel.send("🥊 Challenge accepted! Challenge cooldown synced for 30m.")
+                except Exception:
+                    pass
+            elif content in {"n", "no", "exit"}:
+                challenge_confirmation_states.pop(message.author.id, None)
+                if message.author.id in pending_smart_tracks and "challenge" in pending_smart_tracks[message.author.id]:
+                    pending_smart_tracks[message.author.id].pop("challenge", None)
+                    if not pending_smart_tracks[message.author.id]:
+                        pending_smart_tracks.pop(message.author.id, None)
+                try:
+                    await message.channel.send("❌ Challenge canceled. No cooldown started.")
+                except Exception:
+                    pass
+
     if message.author.bot and is_naruto_botto_author(message.author):
         full_text = message.content
         
@@ -991,6 +1060,7 @@ async def track_cooldown_smart(ctx, cmd):
 
 @bot.command(name="dashboard", aliases=["db", "status"])
 async def dashboard(ctx, member: discord.Member = None):
+    load_cooldowns()
     if member is None:
         member = ctx.author
     
