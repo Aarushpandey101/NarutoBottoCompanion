@@ -36,6 +36,7 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 NARUTO_BOTTO_USER_ID = None
+LAST_QUIZ_TEMP_VIEWS = {}
 
 try:
     raw_bot_id = os.getenv("NARUTO_BOTTO_USER_ID", "").strip()
@@ -1227,13 +1228,13 @@ async def quiz_group(ctx):
             inline=False,
         )
         embed.add_field(
-            name="n quiz confirm <candidate_id>",
-            value="Save one candidate to permanent cache and delete all temp rows for that question.",
+            name="n quiz confirm <ref>[,ref...]",
+            value="Save one or more candidates to permanent cache. You can use temp list numbers, candidate IDs, or key prefixes.",
             inline=False,
         )
         embed.add_field(
-            name="n quiz delete <candidate_id> [question|all]",
-            value="Delete one candidate row or purge the whole question from temp cache.",
+            name="n quiz delete <ref>[,ref...] [question|all]",
+            value="Delete one or more candidate rows, or purge the whole question from temp cache.",
             inline=False,
         )
         embed.set_footer(text="Manage Server permission required for quiz cache commands")
@@ -1280,7 +1281,8 @@ async def quiz_temp(ctx, limit: int = 5):
             inline=False,
         )
 
-    embed.set_footer(text="Use n quiz confirm <candidate_id> to save one answer permanently")
+    _quiz_store_temp_view(ctx, groups)
+    embed.set_footer(text="Use n quiz confirm 1,2,3 to save by list number, or a candidate id/key prefix")
     await ctx.send(embed=embed)
 
 @quiz_group.group(name="perm", aliases=["permanent", "saved"])
@@ -1392,58 +1394,82 @@ async def quiz_perm_edit(ctx, question_ref: str, answer_index: int, *, answer_te
 
 @quiz_group.command(name="confirm", aliases=["save"])
 @commands.has_permissions(manage_guild=True)
-async def quiz_confirm(ctx, candidate_ref: str):
-    candidate, error = _quiz_resolve_review_candidate_reference(candidate_ref)
-    if error == "ambiguous":
-        await ctx.send(
-            f"❌ Ref `{candidate_ref}` matches multiple questions. Use `n quiz temp` and copy the full candidate id instead."
+async def quiz_confirm(ctx, *, candidate_refs: str):
+    candidates, error = _quiz_resolve_review_candidates(candidate_refs, ctx=ctx)
+    if error == "empty":
+        await ctx.send("❌ Provide at least one temporary quiz ref.")
+        return
+    if not candidates:
+        await ctx.send(f"❌ No temporary quiz candidate found for `{candidate_refs}`.")
+        return
+
+    saved = []
+    for candidate in candidates:
+        options = candidate["options_text"].split("\n")
+        _quiz_store_permanent(
+            candidate["question_key"],
+            candidate["question_text"],
+            options,
+            int(candidate["answer_index"]),
+            candidate["answer_text"],
+            candidate["provider"] or "manual",
         )
-        return
-    if not candidate:
-        await ctx.send(f"❌ No temporary quiz candidate found for `{candidate_ref}`.")
-        return
+        _quiz_delete_review_candidates_for_key(candidate["question_key"])
+        quiz_log(
+            f"Manually confirmed quiz candidate id={candidate['id']} question_key={candidate['question_key'][:10]} answer={candidate['answer_index']}"
+        )
+        saved.append(f"`{candidate['id']}` → **{candidate['answer_index']}**")
 
-    options = candidate["options_text"].split("\n")
-    _quiz_store_permanent(
-        candidate["question_key"],
-        candidate["question_text"],
-        options,
-        int(candidate["answer_index"]),
-        candidate["answer_text"],
-        candidate["provider"] or "manual",
-    )
-    _quiz_delete_review_candidates_for_key(candidate["question_key"])
-    quiz_log(
-        f"Manually confirmed quiz candidate id={candidate['id']} question_key={candidate['question_key'][:10]} answer={candidate['answer_index']}"
-    )
-
-    await ctx.send(
-        f"✅ Saved candidate `{candidate['id']}` as permanent answer **{candidate['answer_index']}** and cleared the temp queue for that question."
-    )
+    response = "✅ Saved " + ", ".join(saved) + " and cleared their temp queues."
+    if error:
+        response += f" Note: {error}."
+    await ctx.send(response)
 
 @quiz_group.command(name="delete", aliases=["reject", "remove", "purge"])
 @commands.has_permissions(manage_guild=True)
-async def quiz_delete(ctx, candidate_ref: str, scope: str = None):
-    candidate, error = _quiz_resolve_review_candidate_reference(candidate_ref)
-    if error == "ambiguous":
-        await ctx.send(
-            f"❌ Ref `{candidate_ref}` matches multiple questions. Use `n quiz temp` and copy the full candidate id instead."
-        )
-        return
-    if not candidate:
-        await ctx.send(f"❌ No temporary quiz candidate found for `{candidate_ref}`.")
+async def quiz_delete(ctx, *, candidate_refs: str):
+    tokens = _quiz_split_candidate_refs(candidate_refs)
+    if not tokens:
+        await ctx.send("❌ Provide at least one temporary quiz ref.")
         return
 
-    scope_value = (scope or "").strip().lower()
+    scope_value = ""
+    if tokens and tokens[-1].lower() in {"question", "all", "purge", "queue"}:
+        scope_value = tokens.pop().lower()
+
+    if not tokens:
+        await ctx.send("❌ Provide at least one temporary quiz ref before the scope option.")
+        return
+
+    candidates, error = _quiz_resolve_review_candidates(" ".join(tokens), ctx=ctx)
+    if not candidates:
+        await ctx.send(f"❌ No temporary quiz candidate found for `{', '.join(tokens)}`.")
+        return
+
+    deleted = []
     if scope_value in {"question", "all", "purge", "queue"}:
-        removed = len(_quiz_get_review_candidates_for_key(candidate["question_key"]))
-        _quiz_delete_review_candidates_for_key(candidate["question_key"])
-        await ctx.send(
-            f"🗑️ Deleted **{removed}** temp candidate(s) for that question."
-        )
+        total_removed = 0
+        for candidate in candidates:
+            removed = len(_quiz_get_review_candidates_for_key(candidate["question_key"]))
+            _quiz_delete_review_candidates_for_key(candidate["question_key"])
+            total_removed += removed
+            deleted.append(f"`{candidate['question_key'][:10]}`({removed})")
+            quiz_log(
+                f"Manually purged quiz temp queue question_key={candidate['question_key'][:10]} removed={removed}"
+            )
+        message = f"🗑️ Removed {total_removed} temp candidate(s) across {len(candidates)} question(s): {', '.join(deleted)}."
     else:
-        _quiz_delete_review_candidate(candidate["id"])
-        await ctx.send(f"🗑️ Deleted temp candidate `{candidate['id']}`.")
+        for candidate in candidates:
+            _quiz_delete_review_candidate(candidate["id"])
+            deleted.append(f"`{candidate['id']}`")
+            quiz_log(
+                f"Manually deleted quiz temp candidate id={candidate['id']} question_key={candidate['question_key'][:10]}"
+            )
+        message = f"🗑️ Deleted temp candidate(s): {', '.join(deleted)}."
+
+    if error:
+        message += f" Note: {error}."
+    await ctx.send(message)
 
 @bot.command(name="help", aliases=["commands", "h"])
 async def help_command(ctx):
@@ -1738,6 +1764,39 @@ def _quiz_get_review_candidates_for_key(question_key: str):
         ).fetchall()
     return rows
 
+def _quiz_temp_view_key(ctx):
+    guild_id = getattr(getattr(ctx, "guild", None), "id", None)
+    channel_id = getattr(getattr(ctx, "channel", None), "id", None)
+    author_id = getattr(getattr(ctx, "author", None), "id", None)
+    return (guild_id, channel_id, author_id)
+
+
+def _quiz_store_temp_view(ctx, groups):
+    LAST_QUIZ_TEMP_VIEWS[_quiz_temp_view_key(ctx)] = {
+        "saved_at": time.time(),
+        "groups": [
+            {
+                "index": idx,
+                "question_key": row["question_key"],
+                "question_text": row["question_text"],
+                "options_text": row["options_text"],
+            }
+            for idx, row in enumerate(groups, start=1)
+        ],
+    }
+
+
+def _quiz_get_temp_view(ctx):
+    return LAST_QUIZ_TEMP_VIEWS.get(_quiz_temp_view_key(ctx))
+
+
+def _quiz_split_candidate_refs(candidate_refs: str):
+    raw = str(candidate_refs or "").strip()
+    if not raw:
+        return []
+    return [token for token in re.split(r"[,\s]+", raw) if token.strip()]
+
+
 def _quiz_get_review_candidate_by_id(candidate_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -1751,14 +1810,28 @@ def _quiz_get_review_candidate_by_id(candidate_id: int):
         ).fetchone()
     return row
 
-def _quiz_resolve_review_candidate_reference(candidate_ref: str):
+
+def _quiz_resolve_review_candidate_reference(candidate_ref: str, ctx=None):
     ref = str(candidate_ref or "").strip()
     if not ref:
         return None, "empty"
 
     if ref.isdigit():
         candidate = _quiz_get_review_candidate_by_id(int(ref))
-        return candidate, None if candidate else "not_found"
+        if candidate:
+            return candidate, None
+
+        if ctx is not None:
+            temp_view = _quiz_get_temp_view(ctx)
+            if temp_view:
+                groups = temp_view.get("groups") or []
+                index = int(ref)
+                if 1 <= index <= len(groups):
+                    question_key = groups[index - 1]["question_key"]
+                    candidates = _quiz_get_review_candidates_for_key(question_key)
+                    if candidates:
+                        return candidates[0], None
+                    return None, "not_found"
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -1780,6 +1853,37 @@ def _quiz_resolve_review_candidate_reference(candidate_ref: str):
         return rows, "ambiguous"
 
     return rows[0], None
+
+
+def _quiz_resolve_review_candidates(candidate_refs: str, ctx=None):
+    tokens = _quiz_split_candidate_refs(candidate_refs)
+    if not tokens:
+        return [], "empty"
+
+    resolved = []
+    seen_keys = set()
+    errors = []
+
+    for token in tokens:
+        candidate, error = _quiz_resolve_review_candidate_reference(token, ctx=ctx)
+        if error == "ambiguous":
+            errors.append(f"`{token}` matches multiple questions")
+            continue
+        if not candidate:
+            errors.append(f"`{token}` not found")
+            continue
+
+        question_key = candidate["question_key"]
+        if question_key in seen_keys:
+            continue
+        seen_keys.add(question_key)
+        resolved.append(candidate)
+
+    if errors and not resolved:
+        return [], "; ".join(errors)
+    if errors:
+        return resolved, "; ".join(errors)
+    return resolved, None
 
 def _quiz_delete_review_candidates_for_key(question_key: str):
     with sqlite3.connect(DB_PATH) as conn:
