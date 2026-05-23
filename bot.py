@@ -141,8 +141,9 @@ def init_database():
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS quiz_candidates (
-                question_key TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS quiz_review_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                question_key TEXT NOT NULL,
                 question_text TEXT NOT NULL,
                 options_text TEXT NOT NULL,
                 answer_index INTEGER NOT NULL,
@@ -150,12 +151,16 @@ def init_database():
                 provider TEXT,
                 seen_count INTEGER NOT NULL DEFAULT 1,
                 first_seen_at REAL NOT NULL,
-                last_seen_at REAL NOT NULL
+                last_seen_at REAL NOT NULL,
+                UNIQUE(question_key, provider, answer_index)
             )
             """
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_quiz_candidates_last_seen ON quiz_candidates(last_seen_at)"
+            "CREATE INDEX IF NOT EXISTS idx_quiz_review_candidates_last_seen ON quiz_review_candidates(last_seen_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quiz_review_candidates_question_key ON quiz_review_candidates(question_key)"
         )
 
 def is_naruto_botto_author(author) -> bool:
@@ -1026,6 +1031,121 @@ async def inspect_cooldown_db(ctx):
     embed.set_footer(text="Use n cd list or n cd user for friendlier views")
     await ctx.send(embed=embed)
 
+@bot.group(name="quiz", aliases=["qc", "quizcache"])
+async def quiz_group(ctx):
+    if ctx.invoked_subcommand is None:
+        embed = discord.Embed(
+            title="🧠 Quiz Cache Review",
+            description="Review temporary quiz answers before saving them permanently.",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(
+            name="n quiz temp [limit]",
+            value="Show recent temporary quiz questions and candidate answers.",
+            inline=False,
+        )
+        embed.add_field(
+            name="n quiz confirm <candidate_id>",
+            value="Save one candidate to permanent cache and delete all temp rows for that question.",
+            inline=False,
+        )
+        embed.add_field(
+            name="n quiz delete <candidate_id> [question|all]",
+            value="Delete one candidate row or purge the whole question from temp cache.",
+            inline=False,
+        )
+        embed.set_footer(text="Manage Server permission required for quiz cache commands")
+        await ctx.send(embed=embed)
+
+@quiz_group.command(name="temp", aliases=["review", "queue", "list"])
+@commands.has_permissions(manage_guild=True)
+async def quiz_temp(ctx, limit: int = 5):
+    limit = max(1, min(int(limit or 5), 10))
+    groups = _quiz_get_review_candidates(limit)
+
+    if not groups:
+        await ctx.send("📭 No temporary quiz candidates right now.")
+        return
+
+    embed = discord.Embed(
+        title="🧠 Temporary Quiz Cache",
+        description="Recent questions waiting for manual review.",
+        color=discord.Color.orange(),
+    )
+
+    for idx, group in enumerate(groups, start=1):
+        candidates = _quiz_get_review_candidates_for_key(group["question_key"])
+        question = _truncate_text(group["question_text"], 110)
+        lines = [
+            f"Key: `{group['question_key'][:10]}`",
+            f"Candidates: {int(group['candidate_count'])}",
+        ]
+        for cand in candidates[:5]:
+            answer_text = _truncate_text(cand["answer_text"], 50)
+            provider = cand["provider"] or "unknown"
+            lines.append(
+                f"`{cand['id']}` {provider} -> {cand['answer_index']} {answer_text} (x{cand['seen_count']})"
+            )
+        if len(candidates) > 5:
+            lines.append(f"... and {len(candidates) - 5} more")
+
+        value = "\n".join(lines)
+        if len(value) > 1000:
+            value = value[:997] + "..."
+        embed.add_field(
+            name=f"{idx}. {question}",
+            value=value,
+            inline=False,
+        )
+
+    embed.set_footer(text="Use n quiz confirm <candidate_id> to save one answer permanently")
+    await ctx.send(embed=embed)
+
+@quiz_group.command(name="confirm", aliases=["save"])
+@commands.has_permissions(manage_guild=True)
+async def quiz_confirm(ctx, candidate_id: int):
+    candidate = _quiz_get_review_candidate_by_id(candidate_id)
+    if not candidate:
+        await ctx.send(f"❌ No temporary quiz candidate found for id `{candidate_id}`.")
+        return
+
+    options = candidate["options_text"].split("\n")
+    _quiz_store_permanent(
+        candidate["question_key"],
+        candidate["question_text"],
+        options,
+        int(candidate["answer_index"]),
+        candidate["answer_text"],
+        candidate["provider"] or "manual",
+    )
+    _quiz_delete_review_candidates_for_key(candidate["question_key"])
+    quiz_log(
+        f"Manually confirmed quiz candidate id={candidate_id} question_key={candidate['question_key'][:10]} answer={candidate['answer_index']}"
+    )
+
+    await ctx.send(
+        f"✅ Saved candidate `{candidate_id}` as permanent answer **{candidate['answer_index']}** and cleared the temp queue for that question."
+    )
+
+@quiz_group.command(name="delete", aliases=["reject", "remove", "purge"])
+@commands.has_permissions(manage_guild=True)
+async def quiz_delete(ctx, candidate_id: int, scope: str = None):
+    candidate = _quiz_get_review_candidate_by_id(candidate_id)
+    if not candidate:
+        await ctx.send(f"❌ No temporary quiz candidate found for id `{candidate_id}`.")
+        return
+
+    scope_value = (scope or "").strip().lower()
+    if scope_value in {"question", "all", "purge", "queue"}:
+        removed = len(_quiz_get_review_candidates_for_key(candidate["question_key"]))
+        _quiz_delete_review_candidates_for_key(candidate["question_key"])
+        await ctx.send(
+            f"🗑️ Deleted **{removed}** temp candidate(s) for that question."
+        )
+    else:
+        _quiz_delete_review_candidate(candidate_id)
+        await ctx.send(f"🗑️ Deleted temp candidate `{candidate_id}`.")
+
 @bot.command(name="help", aliases=["commands", "h"])
 async def help_command(ctx):
     embed = discord.Embed(
@@ -1048,7 +1168,7 @@ async def help_command(ctx):
     
     embed.add_field(
         name="🛡️ Admin Commands (Manage Server permission required)",
-        value="```\nn cd list              - Show all active cooldowns\nn cd db                - Inspect the SQLite database\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
+        value="```\nn cd list              - Show all active cooldowns\nn cd db                - Inspect the SQLite database\nn quiz temp [limit]    - Review temporary quiz answers\nn quiz confirm <id>    - Save one temp answer permanently\nn quiz delete <id>     - Delete one temp answer\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
         inline=False
     )
     
@@ -1130,9 +1250,11 @@ def _quiz_lookup_candidate(question_key: str):
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
-            SELECT answer_index, answer_text, provider, seen_count
-            FROM quiz_candidates
+            SELECT id, answer_index, answer_text, provider, seen_count
+            FROM quiz_review_candidates
             WHERE question_key = ?
+            ORDER BY last_seen_at DESC, id DESC
+            LIMIT 1
             """,
             (question_key,),
         ).fetchone()
@@ -1143,18 +1265,16 @@ def _quiz_store_candidate(question_key: str, question_text: str, options, answer
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO quiz_candidates (
+            INSERT INTO quiz_review_candidates (
                 question_key, question_text, options_text, answer_index, answer_text,
                 provider, seen_count, first_seen_at, last_seen_at
             )
             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-            ON CONFLICT(question_key) DO UPDATE SET
+            ON CONFLICT(question_key, provider, answer_index) DO UPDATE SET
                 question_text=excluded.question_text,
                 options_text=excluded.options_text,
-                answer_index=excluded.answer_index,
                 answer_text=excluded.answer_text,
-                provider=excluded.provider,
-                seen_count=quiz_candidates.seen_count + 1,
+                seen_count=quiz_review_candidates.seen_count + 1,
                 last_seen_at=excluded.last_seen_at
             """,
             (
@@ -1198,7 +1318,7 @@ def _quiz_promote_candidate(question_key: str, question_text: str, options, answ
                 now,
             ),
         )
-        conn.execute("DELETE FROM quiz_candidates WHERE question_key = ?", (question_key,))
+        conn.execute("DELETE FROM quiz_review_candidates WHERE question_key = ?", (question_key,))
     quiz_log(f"Promoted quiz question to permanent cache: {question_key}")
 
 def _quiz_store_permanent(question_key: str, question_text: str, options, answer_index: int, answer_text: str, provider: str):
@@ -1230,7 +1350,63 @@ def _quiz_store_permanent(question_key: str, question_text: str, options, answer
                 now,
             ),
         )
-        conn.execute("DELETE FROM quiz_candidates WHERE question_key = ?", (question_key,))
+        conn.execute("DELETE FROM quiz_review_candidates WHERE question_key = ?", (question_key,))
+
+def _quiz_get_review_candidates(limit_questions: int = 10):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT question_key, question_text, options_text, COUNT(*) AS candidate_count, MAX(last_seen_at) AS last_seen_at
+            FROM quiz_review_candidates
+            GROUP BY question_key, question_text, options_text
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+            """,
+            (int(limit_questions),),
+        ).fetchall()
+    return rows
+
+def _quiz_get_review_candidates_for_key(question_key: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, question_key, question_text, options_text, answer_index, answer_text, provider, seen_count, first_seen_at, last_seen_at
+            FROM quiz_review_candidates
+            WHERE question_key = ?
+            ORDER BY last_seen_at DESC, id DESC
+            """,
+            (question_key,),
+        ).fetchall()
+    return rows
+
+def _quiz_get_review_candidate_by_id(candidate_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, question_key, question_text, options_text, answer_index, answer_text, provider, seen_count, first_seen_at, last_seen_at
+            FROM quiz_review_candidates
+            WHERE id = ?
+            """,
+            (int(candidate_id),),
+        ).fetchone()
+    return row
+
+def _quiz_delete_review_candidates_for_key(question_key: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM quiz_review_candidates WHERE question_key = ?", (question_key,))
+
+def _quiz_delete_review_candidate(candidate_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM quiz_review_candidates WHERE id = ?", (int(candidate_id),))
+
+def _truncate_text(text: str, limit: int = 120) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text)).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)] + "..."
 
 def _quiz_text_from_provider_response(raw_text: str):
     if not raw_text:
@@ -1549,30 +1725,19 @@ async def ask_gpt(question_text, options=None):
             )
             return answer_index
 
-    candidate = _quiz_lookup_candidate(question_key)
-    candidate_index = _normalize_answer_index(candidate["answer_index"], options) if candidate else None
-
-    provider_attempts = []
     for provider_name, provider_fn in [
-        ("Groq", _ask_groq),
-        ("Gemini", _ask_gemini),
         ("OpenRouter", _ask_openrouter),
+        ("Gemini", _ask_gemini),
+        ("Groq", _ask_groq),
     ]:
         try:
             result = await provider_fn(question_text, options)
             if result:
                 answer_index, answer_text = result
-                provider_attempts.append(provider_name)
-                if candidate_index is not None and candidate_index == answer_index:
-                    _quiz_promote_candidate(question_key, question_text, options, answer_index, answer_text, provider_name)
-                    quiz_log(
-                        f"Promoted repeated answer to permanent cache: question_key={question_key[:10]} answer={answer_index}"
-                    )
-                else:
-                    _quiz_store_candidate(question_key, question_text, options, answer_index, answer_text, provider_name)
-                    quiz_log(
-                        f"Stored temporary quiz answer: question_key={question_key[:10]} answer={answer_index} provider={provider_name}"
-                    )
+                _quiz_store_candidate(question_key, question_text, options, answer_index, answer_text, provider_name)
+                quiz_log(
+                    f"Stored temporary quiz answer: question_key={question_key[:10]} answer={answer_index} provider={provider_name}"
+                )
                 return answer_index
         except Exception as e:
             quiz_log(f"{provider_name} failed: {e}")
