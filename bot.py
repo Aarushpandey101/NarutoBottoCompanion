@@ -246,6 +246,7 @@ cooldowns = {}
 pending_smart_tracks = {}
 challenge_confirmation_states = {}
 CHALLENGE_PENDING_TTL_SECONDS = 120
+RESYNC_WHEN_ACTIVE = {"mission", "report", "tower", "daily", "weekly", "challenge"}
 
 
 def _cleanup_stale_challenge_state():
@@ -430,6 +431,8 @@ def is_naruto_botto_author(author) -> bool:
 
 def cooldown_row_to_dict(row):
     return {
+        "user_id": int(row["user_id"]),
+        "command": str(row["command"]),
         "expires_at": float(row["expires_at"]),
         "channel_id": int(row["channel_id"]) if row["channel_id"] is not None else None,
         "notified": bool(row["notified"]),
@@ -976,28 +979,57 @@ async def track_cooldown_smart(ctx, cmd):
     
     remaining = get_remaining_time(user_id, cmd)
     if remaining > 0:
-        time_str = format_time(remaining)
-        
-        if should_show_progress_bar(cmd):
-            embed = discord.Embed(
-                title=f"{emoji} {cmd.upper()} - Already on Cooldown",
-                description=f"Your **{cmd}** is still cooling down.",
-                color=discord.Color.orange()
-            )
+        if cmd not in RESYNC_WHEN_ACTIVE:
+            time_str = format_time(remaining)
             
-            total_time = cooldown_times[cmd]
-            elapsed = total_time - remaining
-            progress = get_progress_bar(elapsed, total_time)
-            
-            embed.add_field(name="⏰ Time Remaining", value=f"**{time_str}**", inline=True)
-            embed.add_field(name="📊 Progress", value=progress, inline=False)
-            embed.set_footer(text=f"Requested by {ctx.author.display_name}")
-            
-            await ctx.send(embed=embed)
-        else:
-            fun_msg = random.choice(entertaining_messages.get(cmd, ["Hang tight!"]))
-            message = f"{emoji} **{cmd.upper()}** on cooldown! {time_str} remaining.\n{fun_msg}"
-            await ctx.send(message)
+            if should_show_progress_bar(cmd):
+                embed = discord.Embed(
+                    title=f"{emoji} {cmd.upper()} - Already on Cooldown",
+                    description=f"Your **{cmd}** is still cooling down.",
+                    color=discord.Color.orange()
+                )
+                
+                total_time = cooldown_times[cmd]
+                elapsed = total_time - remaining
+                progress = get_progress_bar(elapsed, total_time)
+                
+                embed.add_field(name="⏰ Time Remaining", value=f"**{time_str}**", inline=True)
+                embed.add_field(name="📊 Progress", value=progress, inline=False)
+                embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                
+                await ctx.send(embed=embed)
+            else:
+                fun_msg = random.choice(entertaining_messages.get(cmd, ["Hang tight!"]))
+                message = f"{emoji} **{cmd.upper()}** on cooldown! {time_str} remaining.\n{fun_msg}"
+                await ctx.send(message)
+            return
+
+        if user_id not in pending_smart_tracks:
+            pending_smart_tracks[user_id] = {}
+
+        track_event = asyncio.Event()
+        pending_smart_tracks[user_id][cmd] = {
+            "channel_id": ctx.channel.id,
+            "timestamp": time.time(),
+            "event": track_event,
+            "resync_only": True,
+            "previous_remaining": remaining,
+        }
+        print(f"🔄 Resync check armed for {cmd} while already on cooldown (user: {user_id})")
+        try:
+            await ctx.message.add_reaction("👀")
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(track_event.wait(), timeout=SMART_TRACK_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+        if user_id in pending_smart_tracks and cmd in pending_smart_tracks[user_id]:
+            del pending_smart_tracks[user_id][cmd]
+            if not pending_smart_tracks[user_id]:
+                del pending_smart_tracks[user_id]
+            print(f"ℹ️ No fresh Naruto Botto timer detected for {cmd}; keeping existing cooldown")
         return
     
     if user_id not in pending_smart_tracks:
