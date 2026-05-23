@@ -3,6 +3,7 @@ import asyncio
 import datetime
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -1293,43 +1294,14 @@ async def quiz_perm_group(ctx):
 @quiz_perm_group.command(name="list", aliases=["show", "recent"])
 @commands.has_permissions(manage_guild=True)
 async def quiz_perm_list(ctx, limit: int = 5):
-    limit = max(1, min(int(limit or 5), 10))
-    rows = _quiz_list_permanent(limit)
-
-    if not rows:
-        await ctx.send("📭 No permanent quiz cache entries yet.")
-        return
-
-    embed = discord.Embed(
-        title="📚 Permanent Quiz Cache",
-        description="Recently saved quiz answers.",
-        color=discord.Color.green(),
-    )
-
-    for idx, row in enumerate(rows, start=1):
-        question = _truncate_text(row["question_text"], 110)
-        answer_text = _truncate_text(row["answer_text"], 60)
-        updated = datetime.datetime.fromtimestamp(float(row["updated_at"])).strftime("%Y-%m-%d %H:%M")
-        value = "\n".join(
-            [
-                f"Key: `{row['question_key'][:10]}`",
-                f"Answer: `{row['answer_index']}` {answer_text}",
-                f"Provider: `{row['provider'] or 'unknown'}`",
-                f"Updated: `{updated}`",
-            ]
-        )
-        embed.add_field(
-            name=f"{idx}. {question}",
-            value=value,
-            inline=False,
-        )
-
-    embed.set_footer(text="Use n quiz perm view <ref> or n quiz perm edit <ref> <index> [text]")
-    await ctx.send(embed=embed)
+    await quiz_perm_browse(ctx, page=1, limit=limit)
 
 @quiz_perm_group.command(name="view", aliases=["get"])
 @commands.has_permissions(manage_guild=True)
-async def quiz_perm_view(ctx, question_ref: str):
+async def quiz_perm_view(ctx, question_ref: str = None):
+    if not question_ref or not str(question_ref).strip():
+        await ctx.send("❌ Usage: `n quiz perm view <ref>`")
+        return
     entry, error = _quiz_resolve_permanent_reference(question_ref)
     if error == "ambiguous":
         await ctx.send(
@@ -1359,6 +1331,25 @@ async def quiz_perm_view(ctx, question_ref: str):
         color=discord.Color.green(),
     )
     await ctx.send(embed=embed)
+
+@quiz_perm_group.command(name="page", aliases=["pages", "browse"])
+@commands.has_permissions(manage_guild=True)
+async def quiz_perm_page(ctx, page: int = 1, limit: int = 5):
+    await quiz_perm_browse(ctx, page=page, limit=limit)
+
+
+async def quiz_perm_browse(ctx, page: int = 1, limit: int = 5):
+    embed, rows, total_pages, page = _quiz_build_permanent_page_embed(page, limit)
+    if not rows:
+        await ctx.send(embed=embed)
+        return
+
+    view = QuizPermBrowseView(author_id=ctx.author.id, page=page, limit=limit)
+    view.prev_button.disabled = page <= 1
+    view.first_button.disabled = page <= 1
+    view.next_button.disabled = page >= total_pages
+    view.last_button.disabled = page >= total_pages
+    await ctx.send(embed=embed, view=view)
 
 @quiz_perm_group.command(name="edit", aliases=["set", "update"])
 @commands.has_permissions(manage_guild=True)
@@ -1493,7 +1484,7 @@ async def help_command(ctx):
     
     embed.add_field(
         name="🛡️ Admin Commands (Manage Server permission required)",
-        value="```\nn cd list              - Show all active cooldowns\nn cd db                - Inspect the SQLite database\nn quiz temp [limit]    - Review temporary quiz answers\nn quiz confirm <ref>   - Save one temp answer permanently\nn quiz delete <ref>    - Delete one temp answer\nn quiz perm            - View recent permanent quiz cache entries\nn quiz perm view <ref> - Show one permanent cache entry\nn quiz perm edit <ref> <index> [text] - Edit permanent cache\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
+        value="```\nn cd list              - Show all active cooldowns\nn cd db                - Inspect the SQLite database\nn quiz temp [limit]    - Review temporary quiz answers\nn quiz confirm <ref...> - Save one or more temp answers permanently\nn quiz delete <ref...>  - Delete one or more temp answers\nn quiz perm            - View recent permanent quiz cache entries\nn quiz perm page <p> [limit] - Browse permanent cache in pages\nn quiz perm view <ref> - Show one permanent cache entry\nn quiz perm edit <ref> <index> [text] - Edit permanent cache\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
         inline=False
     )
     
@@ -1672,7 +1663,7 @@ def _quiz_store_permanent(question_key: str, question_text: str, options, answer
         )
         conn.execute("DELETE FROM quiz_review_candidates WHERE question_key = ?", (question_key,))
 
-def _quiz_list_permanent(limit_rows: int = 10):
+def _quiz_list_permanent(limit_rows: int = 10, offset_rows: int = 0):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
@@ -1680,11 +1671,114 @@ def _quiz_list_permanent(limit_rows: int = 10):
             SELECT question_key, question_text, options_text, answer_index, answer_text, provider, created_at, updated_at
             FROM quiz_cache
             ORDER BY updated_at DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (int(limit_rows),),
+            (int(limit_rows), int(offset_rows)),
         ).fetchall()
     return rows
+
+
+def _quiz_count_permanent():
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT COUNT(*) AS total FROM quiz_cache").fetchone()
+    return int(row["total"]) if row else 0
+
+
+def _quiz_build_permanent_page_embed(page: int, limit: int):
+    page = max(1, int(page or 1))
+    limit = max(1, min(int(limit or 5), 20))
+    total = _quiz_count_permanent()
+    total_pages = max(1, math.ceil(total / limit)) if total else 1
+    page = min(page, total_pages)
+    offset = (page - 1) * limit
+    rows = _quiz_list_permanent(limit, offset)
+
+    embed = discord.Embed(
+        title="📚 Permanent Quiz Cache",
+        description=f"Page {page}/{total_pages} showing up to {limit} saved answers.",
+        color=discord.Color.green(),
+    )
+
+    if not rows:
+        embed.description = "No permanent quiz cache entries yet."
+        embed.set_footer(text="Use n quiz temp and n quiz confirm to add answers.")
+        return embed, rows, total_pages, page
+
+    for idx, row in enumerate(rows, start=offset + 1):
+        question = _truncate_text(row["question_text"], 110)
+        answer_text = _truncate_text(row["answer_text"], 60)
+        updated = datetime.datetime.fromtimestamp(float(row["updated_at"])).strftime("%Y-%m-%d %H:%M")
+        value = "\n".join(
+            [
+                f"Key: `{row['question_key'][:10]}`",
+                f"Answer: `{row['answer_index']}` {answer_text}",
+                f"Provider: `{row['provider'] or 'unknown'}`",
+                f"Updated: `{updated}`",
+            ]
+        )
+        embed.add_field(
+            name=f"{idx}. {question}",
+            value=value,
+            inline=False,
+        )
+
+    embed.set_footer(text="Use the buttons below to browse pages, or n quiz perm view <ref> to inspect one entry.")
+    return embed, rows, total_pages, page
+
+
+class QuizPermBrowseView(discord.ui.View):
+    def __init__(self, author_id: int, page: int = 1, limit: int = 5):
+        super().__init__(timeout=300)
+        self.author_id = int(author_id)
+        self.page = max(1, int(page or 1))
+        self.limit = max(1, min(int(limit or 5), 20))
+
+    async def _render(self, interaction: discord.Interaction):
+        embed, rows, total_pages, current_page = _quiz_build_permanent_page_embed(self.page, self.limit)
+        self.page = current_page
+        self.prev_button.disabled = self.page <= 1
+        self.next_button.disabled = self.page >= total_pages
+        self.first_button.disabled = self.page <= 1
+        self.last_button.disabled = self.page >= total_pages
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user and interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message(
+            "❌ Only the person who opened this cache browser can use these buttons.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="First", emoji="⏮️", style=discord.ButtonStyle.secondary)
+    async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = 1
+        await self._render(interaction)
+
+    @discord.ui.button(label="Prev", emoji="◀️", style=discord.ButtonStyle.primary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(1, self.page - 1)
+        await self._render(interaction)
+
+    @discord.ui.button(label="Next", emoji="▶️", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        await self._render(interaction)
+
+    @discord.ui.button(label="Last", emoji="⏭️", style=discord.ButtonStyle.secondary)
+    async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        total = _quiz_count_permanent()
+        total_pages = max(1, math.ceil(total / self.limit)) if total else 1
+        self.page = total_pages
+        await self._render(interaction)
+
+    @discord.ui.button(label="Close", emoji="✖️", style=discord.ButtonStyle.danger)
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        await interaction.response.edit_message(view=self)
 
 def _quiz_resolve_permanent_reference(question_ref: str):
     ref = str(question_ref or "").strip()
