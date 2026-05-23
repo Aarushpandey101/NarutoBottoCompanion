@@ -566,6 +566,56 @@ def _get_cooldowns_from_db(user_id: int):
         ).fetchall()
     return [cooldown_row_to_dict(row) for row in rows]
 
+
+async def _resolve_member_reference(ctx, member_ref=None):
+    if member_ref is None:
+        return ctx.author
+
+    if isinstance(member_ref, discord.Member):
+        return member_ref
+
+    ref = str(member_ref).strip()
+    if not ref:
+        return ctx.author
+
+    mention_match = re.fullmatch(r"<@!?(\d+)>", ref)
+    raw_id = None
+    if mention_match:
+        raw_id = int(mention_match.group(1))
+    elif ref.isdigit():
+        raw_id = int(ref)
+
+    if raw_id is not None:
+        if ctx.guild:
+            member = ctx.guild.get_member(raw_id)
+            if member:
+                return member
+            try:
+                return await ctx.guild.fetch_member(raw_id)
+            except Exception:
+                pass
+        try:
+            user = bot.get_user(raw_id)
+            if user is None:
+                user = await bot.fetch_user(raw_id)
+            return user
+        except Exception:
+            return ctx.author
+
+    if ctx.guild:
+        member = discord.utils.find(
+            lambda m: ref.lower() in {
+                str(m.display_name).lower(),
+                str(m.name).lower(),
+                str(getattr(m, "global_name", "") or "").lower(),
+            },
+            ctx.guild.members,
+        )
+        if member:
+            return member
+
+    return ctx.author
+
 def save_cooldowns():
     try:
         init_database()
@@ -1107,9 +1157,8 @@ async def track_cooldown_smart(ctx, cmd):
         print(f"✅ Naruto Botto responded! Message already sent by on_message handler")
 
 @bot.command(name="dashboard", aliases=["db", "status"])
-async def dashboard(ctx, member: discord.Member = None):
-    if member is None:
-        member = ctx.author
+async def dashboard(ctx, *, member_ref: str = None):
+    member = await _resolve_member_reference(ctx, member_ref)
     
     user_rows = _get_cooldowns_from_db(member.id)
     if not user_rows:
@@ -1231,9 +1280,8 @@ async def list_cooldowns(ctx):
     await ctx.send(embed=embed)
 
 @cooldown_group.command(name="user", aliases=["check", "u"])
-async def check_user(ctx, member: discord.Member = None):
-    if member is None:
-        member = ctx.author
+async def check_user(ctx, *, member_ref: str = None):
+    member = await _resolve_member_reference(ctx, member_ref)
     
     user_cooldowns = cooldowns.get(member.id, {})
     
