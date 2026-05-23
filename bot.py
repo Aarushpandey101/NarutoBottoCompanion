@@ -1112,11 +1112,7 @@ async def dashboard(ctx, member: discord.Member = None):
         member = ctx.author
     
     user_rows = _get_cooldowns_from_db(member.id)
-    user_cooldowns = {}
-    for idx, row in enumerate(user_rows):
-        user_cooldowns[row.get("command", str(idx))] = row
-    
-    if not user_cooldowns:
+    if not user_rows:
         embed = discord.Embed(
             title=f"🎌 {member.display_name}'s Dashboard",
             description="✅ **All systems ready!** No active cooldowns!",
@@ -1134,75 +1130,48 @@ async def dashboard(ctx, member: discord.Member = None):
     
     embed = discord.Embed(
         title=f"🎌 {member.display_name}'s Dashboard",
-        description=f"📊 **Active Cooldowns Overview**",
+        description=f"📊 **Cooldown Overview**",
         color=discord.Color.blue()
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     
     now = time.time()
-    active_cooldowns = []
-    ready_activities = []
-    next_ready_time = float('inf')
-    next_ready_cmd = None
-    
-    for cmd, data in user_cooldowns.items():
-        remaining = data["expires_at"] - now
+    active_lines = []
+    expired_lines = []
+
+    for row in user_rows:
+        cmd = row.get("command", "unknown")
+        remaining = float(row["expires_at"]) - now
         emoji = cooldown_emojis.get(cmd, "⏰")
-        
+        label = f"{emoji} **{cmd.upper()}**"
+
         if remaining > 0:
             time_str = format_time(remaining)
             total_time = cooldown_times.get(cmd, 3600)
             elapsed = total_time - remaining
             progress = get_progress_bar(elapsed, total_time)
-            
-            active_cooldowns.append({
-                "cmd": cmd,
-                "emoji": emoji,
-                "time": time_str,
-                "progress": progress,
-                "remaining_secs": remaining
-            })
-            
-            if remaining < next_ready_time:
-                next_ready_time = remaining
-                next_ready_cmd = cmd
+            line = f"{label}\n⏰ `{time_str}`\n{progress}" if should_show_progress_bar(cmd) else f"{label}\n⏰ `{time_str}`"
+            active_lines.append(line)
         else:
-            ready_activities.append(f"{emoji} **{cmd.upper()}**")
-    
-    active_cooldowns.sort(key=lambda x: x["remaining_secs"])
-    
-    if active_cooldowns:
-        for cd in active_cooldowns:
-            if should_show_progress_bar(cd['cmd']):
-                embed.add_field(
-                    name=f"{cd['emoji']} {cd['cmd'].upper()}",
-                    value=f"⏰ `{cd['time']}`\n{cd['progress']}",
-                    inline=True
-                )
-            else:
-                embed.add_field(
-                    name=f"{cd['emoji']} {cd['cmd'].upper()}",
-                    value=f"⏰ `{cd['time']}`",
-                    inline=True
-                )
-    
-    if ready_activities:
+            expired_lines.append(f"{label} - expired `{format_time(abs(remaining))}` ago")
+
+    if active_lines:
         embed.add_field(
-            name="✅ Ready Now",
-            value="\n".join(ready_activities),
-            inline=False
+            name="🟢 Active",
+            value="\n\n".join(active_lines[:10]),
+            inline=False,
         )
-    
-    if next_ready_cmd:
+
+    if expired_lines:
         embed.add_field(
-            name="⏭️ Next Ready",
-            value=f"{cooldown_emojis.get(next_ready_cmd, '⏰')} **{next_ready_cmd.upper()}** in `{format_time(next_ready_time)}`",
-            inline=False
+            name="⚫ Expired",
+            value="\n".join(expired_lines[:10]),
+            inline=False,
         )
-    
-    total_active = len(active_cooldowns)
-    total_ready = len(ready_activities)
-    embed.set_footer(text=f"Active: {total_active} | Ready: {total_ready} | Total tracked: {total_active + total_ready}")
+
+    total_active = len(active_lines)
+    total_expired = len(expired_lines)
+    embed.set_footer(text=f"Active: {total_active} | Expired: {total_expired} | Total tracked: {total_active + total_expired}")
     
     await ctx.send(embed=embed)
 
