@@ -1190,7 +1190,7 @@ async def quiz_perm_list(ctx, limit: int = 5):
     embed.set_footer(text="Use n quiz perm view <ref> or n quiz perm edit <ref> <index> [text]")
     await ctx.send(embed=embed)
 
-@quiz_perm_group.command(name="view", aliases=["get", "show"])
+@quiz_perm_group.command(name="view", aliases=["get"])
 @commands.has_permissions(manage_guild=True)
 async def quiz_perm_view(ctx, question_ref: str):
     entry, error = _quiz_resolve_permanent_reference(question_ref)
