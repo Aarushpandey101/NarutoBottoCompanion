@@ -162,6 +162,53 @@ def init_database():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_quiz_review_candidates_question_key ON quiz_review_candidates(question_key)"
         )
+    _migrate_quiz_cache_keys_to_question_only()
+
+def _migrate_quiz_cache_keys_to_question_only():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT question_key, question_text, options_text, answer_index, answer_text, provider, created_at, updated_at
+            FROM quiz_cache
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        ).fetchall()
+
+        if not rows:
+            return
+
+        migrated = {}
+        for row in rows:
+            new_key = hashlib.sha256(_normalize_quiz_text(row["question_text"]).encode("utf-8")).hexdigest()
+            if new_key in migrated:
+                continue
+            migrated[new_key] = row
+
+        if len(migrated) == len(rows) and all(row["question_key"] == hashlib.sha256(_normalize_quiz_text(row["question_text"]).encode("utf-8")).hexdigest() for row in rows):
+            return
+
+        conn.execute("DELETE FROM quiz_cache")
+        for new_key, row in migrated.items():
+            conn.execute(
+                """
+                INSERT INTO quiz_cache (
+                    question_key, question_text, options_text, answer_index, answer_text,
+                    provider, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_key,
+                    row["question_text"],
+                    row["options_text"],
+                    row["answer_index"],
+                    row["answer_text"],
+                    row["provider"],
+                    row["created_at"],
+                    row["updated_at"],
+                ),
+            )
 
 def is_naruto_botto_author(author) -> bool:
     if not author:
@@ -1101,6 +1148,113 @@ async def quiz_temp(ctx, limit: int = 5):
     embed.set_footer(text="Use n quiz confirm <candidate_id> to save one answer permanently")
     await ctx.send(embed=embed)
 
+@quiz_group.group(name="perm", aliases=["permanent", "saved"])
+async def quiz_perm_group(ctx):
+    if ctx.invoked_subcommand is None:
+        await quiz_perm_list(ctx, 5)
+
+@quiz_perm_group.command(name="list", aliases=["show", "recent"])
+@commands.has_permissions(manage_guild=True)
+async def quiz_perm_list(ctx, limit: int = 5):
+    limit = max(1, min(int(limit or 5), 10))
+    rows = _quiz_list_permanent(limit)
+
+    if not rows:
+        await ctx.send("📭 No permanent quiz cache entries yet.")
+        return
+
+    embed = discord.Embed(
+        title="📚 Permanent Quiz Cache",
+        description="Recently saved quiz answers.",
+        color=discord.Color.green(),
+    )
+
+    for idx, row in enumerate(rows, start=1):
+        question = _truncate_text(row["question_text"], 110)
+        answer_text = _truncate_text(row["answer_text"], 60)
+        updated = datetime.datetime.fromtimestamp(float(row["updated_at"])).strftime("%Y-%m-%d %H:%M")
+        value = "\n".join(
+            [
+                f"Key: `{row['question_key'][:10]}`",
+                f"Answer: `{row['answer_index']}` {answer_text}",
+                f"Provider: `{row['provider'] or 'unknown'}`",
+                f"Updated: `{updated}`",
+            ]
+        )
+        embed.add_field(
+            name=f"{idx}. {question}",
+            value=value,
+            inline=False,
+        )
+
+    embed.set_footer(text="Use n quiz perm view <ref> or n quiz perm edit <ref> <index> [text]")
+    await ctx.send(embed=embed)
+
+@quiz_perm_group.command(name="view", aliases=["get", "show"])
+@commands.has_permissions(manage_guild=True)
+async def quiz_perm_view(ctx, question_ref: str):
+    entry, error = _quiz_resolve_permanent_reference(question_ref)
+    if error == "ambiguous":
+        await ctx.send(
+            f"❌ Ref `{question_ref}` matches multiple permanent entries. Use a longer key prefix or more specific question text."
+        )
+        return
+    if not entry:
+        await ctx.send(f"❌ No permanent quiz cache entry found for `{question_ref}`.")
+        return
+
+    options = str(entry["options_text"] or "").split("\n") if entry["options_text"] else []
+    lines = [
+        f"Key: `{entry['question_key']}`",
+        f"Question: {entry['question_text']}",
+        f"Answer index: `{entry['answer_index']}`",
+        f"Answer text: `{entry['answer_text']}`",
+        f"Provider: `{entry['provider'] or 'unknown'}`",
+        f"Updated: `{datetime.datetime.fromtimestamp(float(entry['updated_at'])).strftime('%Y-%m-%d %H:%M')}`",
+    ]
+    if options:
+        lines.append("Options:")
+        lines.extend(f"{i}. {opt}" for i, opt in enumerate(options, start=1))
+
+    embed = discord.Embed(
+        title="📚 Permanent Quiz Cache Entry",
+        description="\n".join(lines),
+        color=discord.Color.green(),
+    )
+    await ctx.send(embed=embed)
+
+@quiz_perm_group.command(name="edit", aliases=["set", "update"])
+@commands.has_permissions(manage_guild=True)
+async def quiz_perm_edit(ctx, question_ref: str, answer_index: int, *, answer_text: str = None):
+    entry, error = _quiz_resolve_permanent_reference(question_ref)
+    if error == "ambiguous":
+        await ctx.send(
+            f"❌ Ref `{question_ref}` matches multiple permanent entries. Use a longer key prefix or more specific question text."
+        )
+        return
+    if not entry:
+        await ctx.send(f"❌ No permanent quiz cache entry found for `{question_ref}`.")
+        return
+
+    options = str(entry["options_text"] or "").split("\n") if entry["options_text"] else []
+    if answer_text is None or not str(answer_text).strip():
+        if 1 <= int(answer_index) <= len(options):
+            answer_text = options[int(answer_index) - 1]
+        else:
+            answer_text = str(entry["answer_text"] or "").strip()
+
+    if not answer_text:
+        await ctx.send("❌ Please provide an `answer_text`, or use a valid `answer_index` that matches the stored options.")
+        return
+
+    _quiz_update_permanent_entry(entry["question_key"], int(answer_index), str(answer_text).strip(), provider="manual")
+    quiz_log(
+        f"Manually edited permanent quiz entry question_key={entry['question_key'][:10]} answer={int(answer_index)}"
+    )
+    await ctx.send(
+        f"✅ Updated permanent cache entry `{entry['question_key'][:10]}` to **{int(answer_index)}** - `{str(answer_text).strip()}`."
+    )
+
 @quiz_group.command(name="confirm", aliases=["save"])
 @commands.has_permissions(manage_guild=True)
 async def quiz_confirm(ctx, candidate_ref: str):
@@ -1178,7 +1332,7 @@ async def help_command(ctx):
     
     embed.add_field(
         name="🛡️ Admin Commands (Manage Server permission required)",
-        value="```\nn cd list              - Show all active cooldowns\nn cd db                - Inspect the SQLite database\nn quiz temp [limit]    - Review temporary quiz answers\nn quiz confirm <id>    - Save one temp answer permanently\nn quiz delete <id>     - Delete one temp answer\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
+        value="```\nn cd list              - Show all active cooldowns\nn cd db                - Inspect the SQLite database\nn quiz temp [limit]    - Review temporary quiz answers\nn quiz confirm <ref>   - Save one temp answer permanently\nn quiz delete <ref>    - Delete one temp answer\nn quiz perm            - View recent permanent quiz cache entries\nn quiz perm view <ref> - Show one permanent cache entry\nn quiz perm edit <ref> <index> [text] - Edit permanent cache\nn cd clear @member     - Clear all user cooldowns\nn cd clear @member cmd - Clear specific cooldown```",
         inline=False
     )
     
@@ -1234,12 +1388,7 @@ def _quiz_options_text(options):
     return "\n".join(options)
 
 def _quiz_question_key(question_text: str, options) -> str:
-    normalized = "||".join(
-        [
-            _normalize_quiz_text(question_text),
-            *[_normalize_quiz_text(option) for option in options],
-        ]
-    )
+    normalized = _normalize_quiz_text(question_text)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 def _quiz_lookup_permanent(question_key: str):
@@ -1247,7 +1396,7 @@ def _quiz_lookup_permanent(question_key: str):
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
-            SELECT answer_index, answer_text, provider
+            SELECT question_key, question_text, options_text, answer_index, answer_text, provider, created_at, updated_at
             FROM quiz_cache
             WHERE question_key = ?
             """,
@@ -1361,6 +1510,69 @@ def _quiz_store_permanent(question_key: str, question_text: str, options, answer
             ),
         )
         conn.execute("DELETE FROM quiz_review_candidates WHERE question_key = ?", (question_key,))
+
+def _quiz_list_permanent(limit_rows: int = 10):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT question_key, question_text, options_text, answer_index, answer_text, provider, created_at, updated_at
+            FROM quiz_cache
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (int(limit_rows),),
+        ).fetchall()
+    return rows
+
+def _quiz_resolve_permanent_reference(question_ref: str):
+    ref = str(question_ref or "").strip()
+    if not ref:
+        return None, "empty"
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        if len(ref) >= 8:
+            rows = conn.execute(
+                """
+                SELECT question_key, question_text, options_text, answer_index, answer_text, provider, created_at, updated_at
+                FROM quiz_cache
+                WHERE question_key LIKE ?
+                ORDER BY updated_at DESC
+                """,
+                (f"{ref}%",),
+            ).fetchall()
+        else:
+            rows = []
+
+        if not rows:
+            rows = conn.execute(
+                """
+                SELECT question_key, question_text, options_text, answer_index, answer_text, provider, created_at, updated_at
+                FROM quiz_cache
+                WHERE LOWER(question_text) LIKE ?
+                ORDER BY updated_at DESC
+                """,
+                (f"%{_normalize_quiz_text(ref)}%",),
+            ).fetchall()
+
+    if not rows:
+        return None, "not_found"
+    if len(rows) > 1:
+        return rows, "ambiguous"
+    return rows[0], None
+
+def _quiz_update_permanent_entry(question_key: str, answer_index: int, answer_text: str, provider: str = "manual"):
+    now = time.time()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE quiz_cache
+            SET answer_index = ?, answer_text = ?, provider = ?, updated_at = ?
+            WHERE question_key = ?
+            """,
+            (int(answer_index), answer_text, provider, now, question_key),
+        )
 
 def _quiz_get_review_candidates(limit_questions: int = 10):
     with sqlite3.connect(DB_PATH) as conn:
@@ -1773,10 +1985,18 @@ async def ask_gpt(question_text, options=None):
 
     cached = _quiz_lookup_permanent(question_key)
     if cached:
+        cached_answer_text = str(cached["answer_text"] or "").strip()
+        if cached_answer_text:
+            for idx, option in enumerate(options, start=1):
+                if _normalize_quiz_text(option) == _normalize_quiz_text(cached_answer_text):
+                    quiz_log(
+                        f"Permanent cache hit for question_key={question_key[:10]} provider={cached['provider']!r} answer={idx}"
+                    )
+                    return idx
         answer_index = _normalize_answer_index(cached["answer_index"], options)
         if answer_index is not None:
             quiz_log(
-                f"Permanent cache hit for question_key={question_key[:10]} provider={cached['provider']!r} answer={answer_index}"
+                f"Permanent cache fallback hit for question_key={question_key[:10]} provider={cached['provider']!r} answer={answer_index}"
             )
             return answer_index
 
