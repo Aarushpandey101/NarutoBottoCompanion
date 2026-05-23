@@ -68,6 +68,141 @@ bot = commands.Bot(command_prefix=["n ", "N "], case_insensitive=True, intents=i
 
 DB_PATH = "cooldowns.sqlite3"
 LEGACY_JSON_PATH = "cooldowns.json"
+CF_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+CF_D1_DATABASE_ID = os.getenv("CLOUDFLARE_D1_DATABASE_ID", "").strip()
+CF_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+USE_CLOUDFLARE_D1 = bool(CF_ACCOUNT_ID and CF_D1_DATABASE_ID and CF_API_TOKEN)
+_LOCAL_SQLITE_CONNECT = sqlite3.connect
+
+
+class _QueryResultCursor:
+    def __init__(self, rows=None, rowcount=-1, lastrowid=None):
+        self._rows = list(rows or [])
+        self.rowcount = rowcount
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+def _d1_api_request(payload):
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/d1/database/{CF_D1_DATABASE_ID}/query"
+    request = urllib_request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {CF_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib_request.urlopen(request, timeout=30) as response:
+        body = response.read().decode("utf-8")
+
+    data = json.loads(body)
+    if not data.get("success", False):
+        errors = data.get("errors") or data.get("messages") or []
+        raise RuntimeError(f"Cloudflare D1 query failed: {errors or body}")
+    return data.get("result") or []
+
+
+def _normalize_d1_params(params):
+    return ["" if value is None else str(value) for value in list(params or [])]
+
+
+class _D1Connection:
+    def __init__(self):
+        self.row_factory = None
+        self._pending_writes = []
+        self._in_context = False
+
+    def __enter__(self):
+        self._in_context = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None and self._pending_writes:
+                payload = {
+                    "batch": [
+                        {"sql": sql, "params": params}
+                        for sql, params in self._pending_writes
+                    ]
+                }
+                _d1_api_request(payload)
+        finally:
+            self._pending_writes = []
+            self._in_context = False
+        return False
+
+    def _is_read_query(self, sql: str) -> bool:
+        statement = (sql or "").strip().lower()
+        if not statement:
+            return True
+        return statement.startswith(("select", "pragma", "with", "explain"))
+
+    def execute(self, sql, params=()):
+        if self._is_read_query(sql):
+            results = _d1_api_request({"sql": sql, "params": _normalize_d1_params(params)})
+            first = results[0] if results else {}
+            rows = first.get("results") or []
+            return _QueryResultCursor(rows=rows)
+
+        if self._in_context:
+            self._pending_writes.append((sql, _normalize_d1_params(params)))
+            return _QueryResultCursor(rows=[])
+
+        results = _d1_api_request({"sql": sql, "params": _normalize_d1_params(params)})
+        first = results[0] if results else {}
+        return _QueryResultCursor(
+            rows=first.get("results") or [],
+            rowcount=int((first.get("meta") or {}).get("changes") or 0),
+            lastrowid=(first.get("meta") or {}).get("last_row_id"),
+        )
+
+    def executemany(self, sql, seq_of_params):
+        if self._in_context:
+            for params in seq_of_params:
+                self._pending_writes.append((sql, _normalize_d1_params(params)))
+            return _QueryResultCursor(rows=[])
+
+        payload = {"batch": [{"sql": sql, "params": _normalize_d1_params(params)} for params in seq_of_params]}
+        results = _d1_api_request(payload)
+        last = results[-1] if results else {}
+        return _QueryResultCursor(
+            rows=(last.get("results") or []),
+            rowcount=int(sum(int((item.get("meta") or {}).get("changes") or 0) for item in results)),
+            lastrowid=(last.get("meta") or {}).get("last_row_id"),
+        )
+
+    def commit(self):
+        if self._pending_writes:
+            payload = {
+                "batch": [
+                    {"sql": sql, "params": params}
+                    for sql, params in self._pending_writes
+                ]
+            }
+            _d1_api_request(payload)
+            self._pending_writes = []
+
+    def rollback(self):
+        self._pending_writes = []
+
+    def close(self):
+        self._pending_writes = []
+
+
+def _connect_database(*args, **kwargs):
+    if USE_CLOUDFLARE_D1:
+        return _D1Connection()
+    return _LOCAL_SQLITE_CONNECT(*args, **kwargs)
+
+
+sqlite3.connect = _connect_database
 
 cooldown_times = {
     "mission": 60,
