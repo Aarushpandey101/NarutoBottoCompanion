@@ -1,6 +1,7 @@
 from keep_alive import keep_alive
 import asyncio
 import datetime
+import hashlib
 import json
 import os
 import random
@@ -8,6 +9,8 @@ import re
 import sqlite3
 import time
 from typing import Dict, Optional
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import discord
 from discord import app_commands
@@ -23,6 +26,10 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 SMART_TRACK_WAIT_SECONDS = float(os.getenv("SMART_TRACK_WAIT_SECONDS", "3.5"))
 QUIZ_ALLOW_LOCAL_FALLBACK = os.getenv("QUIZ_ALLOW_LOCAL_FALLBACK", "false").lower() == "true"
 QUIZ_DEBUG = os.getenv("QUIZ_DEBUG", "false").lower() == "true"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 NARUTO_BOTTO_USER_ID = None
 
 try:
@@ -105,6 +112,38 @@ def init_database():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cooldowns_expires_at ON cooldowns(expires_at)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quiz_cache (
+                question_key TEXT PRIMARY KEY,
+                question_text TEXT NOT NULL,
+                options_text TEXT NOT NULL,
+                answer_index INTEGER NOT NULL,
+                answer_text TEXT NOT NULL,
+                provider TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quiz_candidates (
+                question_key TEXT PRIMARY KEY,
+                question_text TEXT NOT NULL,
+                options_text TEXT NOT NULL,
+                answer_index INTEGER NOT NULL,
+                answer_text TEXT NOT NULL,
+                provider TEXT,
+                seen_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at REAL NOT NULL,
+                last_seen_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quiz_candidates_last_seen ON quiz_candidates(last_seen_at)"
         )
 
 def is_naruto_botto_author(author) -> bool:
@@ -1049,6 +1088,160 @@ class QuizAnswer(BaseModel):
     answer_index: int
     answer_text: str
 
+def _quiz_options_text(options):
+    return "\n".join(options)
+
+def _quiz_question_key(question_text: str, options) -> str:
+    normalized = "||".join(
+        [
+            _normalize_quiz_text(question_text),
+            *[_normalize_quiz_text(option) for option in options],
+        ]
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+def _quiz_lookup_permanent(question_key: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT answer_index, answer_text, provider
+            FROM quiz_cache
+            WHERE question_key = ?
+            """,
+            (question_key,),
+        ).fetchone()
+    return row
+
+def _quiz_lookup_candidate(question_key: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT answer_index, answer_text, provider, seen_count
+            FROM quiz_candidates
+            WHERE question_key = ?
+            """,
+            (question_key,),
+        ).fetchone()
+    return row
+
+def _quiz_store_candidate(question_key: str, question_text: str, options, answer_index: int, answer_text: str, provider: str):
+    now = time.time()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO quiz_candidates (
+                question_key, question_text, options_text, answer_index, answer_text,
+                provider, seen_count, first_seen_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(question_key) DO UPDATE SET
+                question_text=excluded.question_text,
+                options_text=excluded.options_text,
+                answer_index=excluded.answer_index,
+                answer_text=excluded.answer_text,
+                provider=excluded.provider,
+                seen_count=quiz_candidates.seen_count + 1,
+                last_seen_at=excluded.last_seen_at
+            """,
+            (
+                question_key,
+                question_text,
+                _quiz_options_text(options),
+                int(answer_index),
+                answer_text,
+                provider,
+                now,
+                now,
+            ),
+        )
+
+def _quiz_promote_candidate(question_key: str, question_text: str, options, answer_index: int, answer_text: str, provider: str):
+    now = time.time()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO quiz_cache (
+                question_key, question_text, options_text, answer_index, answer_text,
+                provider, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(question_key) DO UPDATE SET
+                question_text=excluded.question_text,
+                options_text=excluded.options_text,
+                answer_index=excluded.answer_index,
+                answer_text=excluded.answer_text,
+                provider=excluded.provider,
+                updated_at=excluded.updated_at
+            """,
+            (
+                question_key,
+                question_text,
+                _quiz_options_text(options),
+                int(answer_index),
+                answer_text,
+                provider,
+                now,
+                now,
+            ),
+        )
+        conn.execute("DELETE FROM quiz_candidates WHERE question_key = ?", (question_key,))
+    quiz_log(f"Promoted quiz question to permanent cache: {question_key}")
+
+def _quiz_store_permanent(question_key: str, question_text: str, options, answer_index: int, answer_text: str, provider: str):
+    now = time.time()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO quiz_cache (
+                question_key, question_text, options_text, answer_index, answer_text,
+                provider, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(question_key) DO UPDATE SET
+                question_text=excluded.question_text,
+                options_text=excluded.options_text,
+                answer_index=excluded.answer_index,
+                answer_text=excluded.answer_text,
+                provider=excluded.provider,
+                updated_at=excluded.updated_at
+            """,
+            (
+                question_key,
+                question_text,
+                _quiz_options_text(options),
+                int(answer_index),
+                answer_text,
+                provider,
+                now,
+                now,
+            ),
+        )
+        conn.execute("DELETE FROM quiz_candidates WHERE question_key = ?", (question_key,))
+
+def _quiz_text_from_provider_response(raw_text: str):
+    if not raw_text:
+        return None
+    raw_text = raw_text.strip()
+    if raw_text.startswith("```"):
+        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
+        raw_text = re.sub(r"\s*```$", "", raw_text)
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        raw_text = raw_text[start:end + 1]
+    return raw_text
+
+def _normalize_answer_index(answer_index, options):
+    try:
+        answer_index = int(answer_index)
+    except Exception:
+        return None
+    if 1 <= answer_index <= len(options):
+        return answer_index
+    return None
+
 def _extract_quiz_payload(message):
     options = []
     question_bits = []
@@ -1190,73 +1383,198 @@ def _pick_local_quiz_answer(question_text: str, options):
 
     return best_option
 
-async def ask_gpt(question_text, options=None):
-    if not options:
-        quiz_log("Skipping Gemini call because no options were detected.")
+def _build_quiz_prompt(question_text: str, options):
+    return (
+        "Pick the correct option for this Naruto Botto quiz.\n"
+        "Return JSON only with answer_index and answer_text.\n"
+        "Rules:\n"
+        "- answer_index must be the 1-based index of one option from the list.\n"
+        "- answer_text must exactly match the chosen option text.\n"
+        "- The answer must be based on Naruto knowledge, not text similarity.\n"
+        "- If the question is asking for a specific Naruto fact, choose the factual option.\n"
+        "- Do not add explanations.\n\n"
+        f"Question:\n{question_text}\n\n"
+        "Options:\n"
+        + "\n".join(f"{idx + 1}. {option}" for idx, option in enumerate(options))
+    )
+
+def _call_chat_completion(endpoint: str, api_key: str, model: str, question_text: str, options, provider_name: str, extra_headers=None):
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You answer multiple-choice quiz questions. "
+                    "Use only the provided options and return JSON only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": _build_quiz_prompt(question_text, options),
+            },
+        ],
+        "temperature": 0,
+        "max_completion_tokens": 64,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    request = urllib_request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(request, timeout=20) as response:
+            body = response.read().decode("utf-8")
+            quiz_log(f"{provider_name} raw response: {body[:240]!r}")
+            return body
+    except urllib_error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"{provider_name} HTTP {e.code}: {body or e.reason}")
+    except Exception as e:
+        raise RuntimeError(f"{provider_name} request failed: {e}")
+
+def _extract_provider_answer(raw_text: str, options):
+    cleaned = _quiz_text_from_provider_response(raw_text)
+    if not cleaned:
+        raise ValueError("empty provider response")
+
+    parsed = QuizAnswer.model_validate_json(cleaned)
+    answer_index = _normalize_answer_index(parsed.answer_index, options)
+    answer_text = str(parsed.answer_text).strip()
+
+    if answer_index is not None:
+        return answer_index, answer_text
+
+    for idx, option in enumerate(options, start=1):
+        if _normalize_quiz_text(option) == _normalize_quiz_text(answer_text):
+            return idx, answer_text
+
+    raise ValueError("provider response did not match supplied options")
+
+async def _ask_groq(question_text: str, options):
+    if not GROQ_API_KEY:
+        return None
+    raw = await asyncio.to_thread(
+        _call_chat_completion,
+        "https://api.groq.com/openai/v1/chat/completions",
+        GROQ_API_KEY,
+        GROQ_MODEL,
+        question_text,
+        options,
+        "Groq",
+    )
+    return _extract_provider_answer(raw, options)
+
+async def _ask_gemini(question_text: str, options):
+    if not gemini_client or not GEMINI_API_KEY:
         return None
 
-    if gemini_client and ENABLE_GPT:
-        try:
+    quiz_log(f"Sending question to Gemini. question={question_text[:240]!r} options={options!r}")
+    prompt = _build_quiz_prompt(question_text, options)
+    response = await asyncio.to_thread(
+        lambda: gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=(
+                    "You answer multiple-choice quiz questions. "
+                    "Use only the provided options and return JSON only."
+                ),
+                response_mime_type="application/json",
+                temperature=0,
+                max_output_tokens=64,
+            ),
+        )
+    )
+    quiz_log(f"Gemini raw response: {response.text[:240]!r}")
+    return _extract_provider_answer(response.text, options)
+
+async def _ask_openrouter(question_text: str, options):
+    if not OPENROUTER_API_KEY:
+        return None
+    raw = await asyncio.to_thread(
+        _call_chat_completion,
+        "https://openrouter.ai/api/v1/chat/completions",
+        OPENROUTER_API_KEY,
+        OPENROUTER_MODEL,
+        question_text,
+        options,
+        "OpenRouter",
+        {
+            "HTTP-Referer": "https://discord.com",
+            "X-Title": "Naruto Botto Companion",
+        },
+    )
+    return _extract_provider_answer(raw, options)
+
+async def ask_gpt(question_text, options=None):
+    if not options:
+        quiz_log("Skipping quiz call because no options were detected.")
+        return None
+
+    question_key = _quiz_question_key(question_text, options)
+
+    cached = _quiz_lookup_permanent(question_key)
+    if cached:
+        answer_index = _normalize_answer_index(cached["answer_index"], options)
+        if answer_index is not None:
             quiz_log(
-                f"Sending question to Gemini. question={question_text[:240]!r} options={options!r}"
+                f"Permanent cache hit for question_key={question_key[:10]} provider={cached['provider']!r} answer={answer_index}"
             )
-            prompt = (
-                "Pick the correct option for this Naruto Botto quiz.\n"
-                "Return JSON only with answer_index and answer_text.\n"
-                "Rules:\n"
-                "- answer_index must be the 1-based index of one option from the list.\n"
-                "- answer_text must exactly match the chosen option text.\n"
-                "- The answer must be based on Naruto knowledge, not text similarity.\n"
-                "- If the question is asking for a specific Naruto fact, choose the factual option.\n"
-                "- Do not add explanations.\n\n"
-                f"Question:\n{question_text}\n\n"
-                "Options:\n"
-                + "\n".join(f"{idx + 1}. {option}" for idx, option in enumerate(options))
-            )
+            return answer_index
 
-            response = await asyncio.to_thread(
-                lambda: gemini_client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=(
-                            "You answer multiple-choice quiz questions. "
-                            "Use only the provided options and return JSON only."
-                        ),
-                        response_mime_type="application/json",
-                        temperature=0,
-                        max_output_tokens=64,
-                    ),
-                )
-            )
+    candidate = _quiz_lookup_candidate(question_key)
+    candidate_index = _normalize_answer_index(candidate["answer_index"], options) if candidate else None
 
-            quiz_log(f"Gemini raw response: {response.text[:240]!r}")
-            try:
-                parsed = QuizAnswer.model_validate_json(response.text)
-                answer_index = int(parsed.answer_index)
-                answer_text = str(parsed.answer_text).strip()
-
-                if 1 <= answer_index <= len(options):
-                    quiz_log(f"Gemini parsed answer index: {answer_index}")
-                    return answer_index
-
-                for idx, option in enumerate(options, start=1):
-                    if _normalize_quiz_text(option) == _normalize_quiz_text(answer_text):
-                        quiz_log(f"Gemini parsed answer text matched option #{idx}")
-                        return idx
-
-                quiz_log("Gemini parsed response did not match supplied options.")
-            except Exception as parse_error:
-                quiz_log(f"Gemini JSON parse failed: {parse_error}")
+    provider_attempts = []
+    for provider_name, provider_fn in [
+        ("Groq", _ask_groq),
+        ("Gemini", _ask_gemini),
+        ("OpenRouter", _ask_openrouter),
+    ]:
+        try:
+            result = await provider_fn(question_text, options)
+            if result:
+                answer_index, answer_text = result
+                provider_attempts.append(provider_name)
+                if candidate_index is not None and candidate_index == answer_index:
+                    _quiz_promote_candidate(question_key, question_text, options, answer_index, answer_text, provider_name)
+                    quiz_log(
+                        f"Promoted repeated answer to permanent cache: question_key={question_key[:10]} answer={answer_index}"
+                    )
+                else:
+                    _quiz_store_candidate(question_key, question_text, options, answer_index, answer_text, provider_name)
+                    quiz_log(
+                        f"Stored temporary quiz answer: question_key={question_key[:10]} answer={answer_index} provider={provider_name}"
+                    )
+                return answer_index
         except Exception as e:
-            print(f"❌ Gemini quiz helper failed: {e}")
+            quiz_log(f"{provider_name} failed: {e}")
+            continue
 
     if QUIZ_ALLOW_LOCAL_FALLBACK:
         quiz_log("Using local fallback because QUIZ_ALLOW_LOCAL_FALLBACK=true.")
         local_answer = _pick_local_quiz_answer(question_text, options)
         if local_answer and local_answer in options:
+            answer_index = options.index(local_answer) + 1
+            answer_text = local_answer
+            _quiz_store_candidate(question_key, question_text, options, answer_index, answer_text, "local")
             quiz_log(f"Local fallback selected: {local_answer!r}")
-            return options.index(local_answer) + 1
+            return answer_index
         quiz_log("Local fallback could not find a confident answer.")
     else:
         quiz_log("No fallback allowed; skipping answer.")

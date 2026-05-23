@@ -25,6 +25,8 @@ An intelligent Discord bot that helps you track cooldowns for the Naruto Botto g
 Click the Secrets tab (🔒) and add:
 - `DISCORD_TOKEN` - Your Discord bot token (required)
 - `GEMINI_API_KEY` - Your Gemini API key from Google AI Studio (optional, for quiz feature)
+- `GROQ_API_KEY` - Optional Groq API key for quiz fallback
+- `OPENROUTER_API_KEY` - Optional OpenRouter API key for quiz fallback
 - `ENABLE_GPT` - Set to `true` to enable quiz auto-answer (optional)
 - `QUIZ_ALLOW_LOCAL_FALLBACK` - Set to `true` only if you want the bot to guess when Gemini fails
 - `QUIZ_DEBUG` - Set to `true` to print quiz-detection logs in the bot console

@@ -171,6 +171,10 @@ Built-in Python modules:
 - `DISCORD_TOKEN`: Discord bot token (required)
 - `GEMINI_API_KEY`: Gemini API key for quiz answers (optional)
 - `GEMINI_MODEL`: Gemini model for quiz answers (optional, default: `gemini-2.5-flash-lite`)
+- `GROQ_API_KEY`: Groq API key for quiz fallback (optional)
+- `GROQ_MODEL`: Groq model for quiz fallback (optional, default: `llama-3.3-70b-versatile`)
+- `OPENROUTER_API_KEY`: OpenRouter API key for quiz fallback (optional)
+- `OPENROUTER_MODEL`: OpenRouter model for quiz fallback (optional, default: `openai/gpt-4o-mini`)
 - `ENABLE_GPT`: Set to "true" to enable quiz auto-answer feature (optional, default: false)
 - `QUIZ_ALLOW_LOCAL_FALLBACK`: Set to "true" only if you want the bot to guess when Gemini fails
 - `QUIZ_DEBUG`: Set to "true" to print quiz-detection logs in the bot console
