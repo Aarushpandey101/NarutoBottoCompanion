@@ -547,6 +547,22 @@ def get_remaining_time(user_id: int, cmd: str) -> float:
         return remaining if remaining > 0 else 0
     return 0
 
+
+def _get_cooldowns_from_db(user_id: int):
+    init_database()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT user_id, command, expires_at, channel_id, notified
+            FROM cooldowns
+            WHERE user_id = ?
+            ORDER BY expires_at ASC
+            """,
+            (int(user_id),),
+        ).fetchall()
+    return [cooldown_row_to_dict(row) for row in rows]
+
 def save_cooldowns():
     try:
         init_database()
@@ -1060,11 +1076,13 @@ async def track_cooldown_smart(ctx, cmd):
 
 @bot.command(name="dashboard", aliases=["db", "status"])
 async def dashboard(ctx, member: discord.Member = None):
-    load_cooldowns()
     if member is None:
         member = ctx.author
     
-    user_cooldowns = cooldowns.get(member.id, {})
+    user_rows = _get_cooldowns_from_db(member.id)
+    user_cooldowns = {}
+    for idx, row in enumerate(user_rows):
+        user_cooldowns[row.get("command", str(idx))] = row
     
     if not user_cooldowns:
         embed = discord.Embed(
