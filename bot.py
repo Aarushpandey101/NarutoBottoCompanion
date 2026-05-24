@@ -340,7 +340,7 @@ def _dedupe_cooldowns_table():
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT rowid, user_id, command, expires_at, channel_id, notified
+            SELECT rowid, CAST(user_id AS TEXT) AS user_id, command, expires_at, CAST(channel_id AS TEXT) AS channel_id, notified
             FROM cooldowns
             ORDER BY user_id ASC, command ASC, expires_at DESC, rowid DESC
             """
@@ -557,7 +557,7 @@ def _get_cooldowns_from_db(user_id: int):
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT user_id, command, expires_at, channel_id, notified
+            SELECT CAST(user_id AS TEXT) AS user_id, command, expires_at, CAST(channel_id AS TEXT) AS channel_id, notified
             FROM cooldowns
             WHERE user_id = ?
             ORDER BY expires_at ASC
@@ -680,7 +680,7 @@ def load_cooldowns():
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT user_id, command, expires_at, channel_id, notified
+                SELECT CAST(user_id AS TEXT) AS user_id, command, expires_at, CAST(channel_id AS TEXT) AS channel_id, notified
                 FROM cooldowns
                 """
             ).fetchall()
@@ -1350,7 +1350,7 @@ async def inspect_cooldown_db(ctx):
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT user_id, command, expires_at, channel_id, notified
+                SELECT CAST(user_id AS TEXT) AS user_id, command, expires_at, CAST(channel_id AS TEXT) AS channel_id, notified
                 FROM cooldowns
                 ORDER BY expires_at ASC
                 """
