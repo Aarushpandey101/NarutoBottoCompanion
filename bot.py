@@ -39,6 +39,15 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 NARUTO_BOTTO_USER_ID = None
 LAST_QUIZ_TEMP_VIEWS = {}
 
+# Message IDs we already answered this session — prevents double-answering when
+# the same message fires via on_message and on_message_edit (Naruto Botto often
+# posts an empty skeleton message and fills in the question via a message edit).
+# Bound the set so a long-running process doesn't grow unbounded.
+_QUIZ_ANSWERED_IDS = set()
+
+import time as _time
+_QUIZ_ANSWERED_IDS_TIME = {}  # id -> ts, pruned alongside the set
+
 try:
     raw_bot_id = os.getenv("NARUTO_BOTTO_USER_ID", "").strip()
     if raw_bot_id:
@@ -793,6 +802,60 @@ async def on_ready():
         )
     )
 
+def _component_text(comp):
+    """Best-effort text extraction from a component (version-proof across discord.py)."""
+    for attr in ("text", "content"):
+        value = getattr(comp, attr, None)
+        if isinstance(value, str) and value.strip():
+            return str(value)
+    return None
+
+def _quiz_describe_components(components) -> str:
+    if not components:
+        return "[]"
+    parts = []
+    for row in components:
+        row_type = getattr(row, "type", None)
+        children = getattr(row, "children", None) or []
+        child_parts = []
+        for child in children:
+            child_type = getattr(child, "type", None)
+            type_name = getattr(child_type, "name", None) or str(child_type)
+            label = getattr(child, "label", None)
+            custom_id = getattr(child, "custom_id", None)
+            emoji = getattr(child, "emoji", None)
+            emoji_bit = ""
+            if emoji is not None:
+                emoji_bit = f" emoji={getattr(emoji, 'name', None)!r}"
+            text_bit = ""
+            comp_text = _component_text(child)
+            if comp_text:
+                text_bit = f" text={comp_text[:80]!r}"
+            options = getattr(child, "options", None)
+            if options:
+                opt_labels = [getattr(opt, "label", None) for opt in options]
+                child_parts.append(f"select(label={label!r}, id={custom_id!r}, opts={opt_labels!r})")
+                continue
+            fields = getattr(child, "fields", None)
+            if fields:
+                field_texts = [_component_text(f) for f in fields]
+                child_parts.append(f"{type_name}(fields={field_texts!r})")
+                continue
+            if type_name in ("button", "text_display", "section", "separator"):
+                child_parts.append(f"{type_name}(label={label!r}, id={custom_id!r}{emoji_bit}{text_bit})")
+                continue
+            child_parts.append(f"{type_name}(label={label!r}, id={custom_id!r}{emoji_bit}{text_bit})")
+        parts.append(f"row({row_type}): " + ", ".join(child_parts))
+    return " | ".join(parts)
+
+def _quiz_describe_attachments(attachments) -> str:
+    if not attachments:
+        return "[]"
+    return ", ".join(
+        f"{getattr(a, 'filename', None)!r}({getattr(a, 'content_type', None)}, {getattr(a, 'url', '')[:90]})"
+        for a in attachments
+    )
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -805,18 +868,37 @@ async def on_message(message):
             f"id={getattr(message.author, 'id', None)}",
             f"name={getattr(message.author, 'name', None)!r}",
             f"display_name={getattr(message.author, 'display_name', None)!r}",
-            f"global_name={getattr(message.author, 'global_name', None)!r}",
-            f"nick={getattr(message.author, 'nick', None)!r}",
             f"bot={getattr(message.author, 'bot', None)}",
             f"is_naruto={is_naruto_botto_author(message.author)}",
             f"embeds={len(message.embeds)}",
             f"content={message.content[:120]!r}",
+            f"type={message.type}",
+            f"attachments={_quiz_describe_attachments(message.attachments)}",
+            f"components={_quiz_describe_components(message.components)}",
+            f"stickers={len(message.stickers)}",
+            f"channel={getattr(getattr(message, 'channel', None), 'name', None)}",
         ]
+        if message.embeds:
+            embed_bits = []
+            for embed in message.embeds:
+                img = ""
+                if embed.image and embed.image.url:
+                    img = f" img={embed.image.url[:90]}"
+                elif embed.thumbnail and embed.thumbnail.url:
+                    img = f" thumb={embed.thumbnail.url[:90]}"
+                embed_bits.append(f"{embed.type}{img}")
+            author_bits.append("embedtypes=" + ",".join(embed_bits))
+        reference = message.reference
+        if reference and reference.message_id:
+            author_bits.append(f"reply_to={reference.message_id}")
+        interaction = getattr(message, "interaction_metadata", None) or getattr(message, "interaction", None)
+        if interaction:
+            author_bits.append(f"interaction={getattr(interaction, 'name', None)}")
         print("[QUIZ] Message seen: " + " | ".join(author_bits), flush=True)
 
     # Quiz handling should not depend on the bot-name filter; some bot/app
     # messages do not present a stable author name even though they are valid quiz embeds.
-    if ENABLE_GPT and message.embeds and message.author != bot.user:
+    if ENABLE_GPT and message.author.bot and (message.embeds or message.components):
         await maybe_answer_quiz(message)
 
     if not message.author.bot:
@@ -2206,6 +2288,62 @@ def _normalize_answer_index(answer_index, options):
         return answer_index
     return None
 
+def _collect_component_payload(message):
+    """Pull quiz text out of Discord content-components (text_display/section/buttons/selects).
+
+    Naruto Botto's new format renders the question inside text_display / section
+    components and the options as buttons (or a select menu) in an action row,
+    with empty message.content and no embeds.
+    """
+    question_lines = []
+    option_texts = []
+
+    def walk(items):
+        for item in items:
+            type_name = getattr(getattr(item, "type", None), "name", None) or str(getattr(item, "type", None))
+            if type_name == "text_display":
+                text = _component_text(item)
+                if text:
+                    question_lines.append(text)
+            elif type_name == "section":
+                field_texts = []
+                for field in getattr(item, "fields", None) or []:
+                    field_text = _component_text(field)
+                    if field_text:
+                        field_texts.append(field_text)
+                if field_texts:
+                    question_lines.extend(field_texts)
+                else:
+                    section_text = _component_text(item)
+                    if section_text:
+                        question_lines.append(section_text)
+                accessory = getattr(item, "accessory", None)
+                if accessory is not None:
+                    walk([accessory])
+            elif type_name == "button":
+                label = getattr(item, "label", None)
+                if label:
+                    option_texts.append(str(label))
+                else:
+                    emoji = getattr(item, "emoji", None)
+                    if emoji is not None:
+                        emoji_name = getattr(emoji, "name", None)
+                        if emoji_name:
+                            option_texts.append(str(emoji_name))
+                    else:
+                        text = _component_text(item)
+                        if text:
+                            option_texts.append(text)
+            elif type_name in ("select", "select_menu"):
+                for opt in getattr(item, "options", None) or []:
+                    label = getattr(opt, "label", None)
+                    if label:
+                        option_texts.append(str(label))
+
+    for row in message.components:
+        walk(getattr(row, "children", None) or [])
+    return question_lines, option_texts
+
 def _extract_quiz_payload(message):
     options = []
     question_bits = []
@@ -2315,6 +2453,26 @@ def _extract_quiz_payload(message):
                     add_question_text(field_name)
                 elif not noise_line_re.match(field_name):
                     add_question_text(field_name)
+
+    comp_lines, comp_options = _collect_component_payload(message)
+    for line in comp_lines:
+        line = clean_line(line)
+        if not line:
+            continue
+        if is_question_like(line):
+            add_question_text(line)
+            continue
+        match = numbered_line_re.match(line)
+        if match:
+            add_option(match.group(1))
+        elif not noise_line_re.match(line):
+            add_question_text(line)
+    # Button/select options are the actual answer slots (emoji 1/2/3 etc.),
+    # but text options carry the real content — prefer them. Only fall back to
+    # button options when the message text yielded no options at all.
+    if not options:
+        for opt_text in comp_options:
+            add_option(opt_text)
 
     full_text = "\n".join(title_bits + question_bits + options).strip()
     question_text = " ".join(question_bits).strip()
@@ -2545,6 +2703,10 @@ async def maybe_answer_quiz(message):
     if not ENABLE_GPT:
         return
 
+    if message.id in _QUIZ_ANSWERED_IDS:
+        quiz_log(f"Skipping already-answered message id={message.id}")
+        return
+
     full_text, options = _extract_quiz_payload(message)
     has_question = bool(full_text) and any(
         token in full_text.lower()
@@ -2567,8 +2729,31 @@ async def maybe_answer_quiz(message):
             await message.reply(f"Answer: {answer}", mention_author=False)
         except Exception:
             await message.channel.send(f"Answer: {answer}")
+        # Record so an on_message_edit of the same message doesn't re-answer.
+        _QUIZ_ANSWERED_IDS.add(message.id)
+        _QUIZ_ANSWERED_IDS_TIME[message.id] = time.time()
+        if len(_QUIZ_ANSWERED_IDS) > 1000:
+            cutoff = time.time() - 3600
+            stale = [mid for mid, ts in _QUIZ_ANSWERED_IDS_TIME.items() if ts < cutoff]
+            for mid in stale:
+                _QUIZ_ANSWERED_IDS.discard(mid)
+                _QUIZ_ANSWERED_IDS_TIME.pop(mid, None)
     else:
         quiz_log("No answer sent.")
+
+@bot.event
+async def on_message_edit(before, after):
+    if after.author == bot.user:
+        return
+    if QUIZ_DEBUG:
+        quiz_log(
+            f"Message edit seen: id={after.id} | bot={after.author.bot} "
+            f"embeds={len(after.embeds)} content={after.content[:120]!r}"
+        )
+    # Naruto Botto posts an empty skeleton message and often fills the question
+    # in via an edit — treat edited messages like new ones for quiz detection.
+    if ENABLE_GPT and after.author.bot and (after.embeds or after.components or after.content):
+        await maybe_answer_quiz(after)
 
 keep_alive()
 bot.run(DISCORD_TOKEN)
