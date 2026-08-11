@@ -793,35 +793,6 @@ async def on_ready():
         )
     )
 
-def _quiz_describe_components(components) -> str:
-    if not components:
-        return "[]"
-    parts = []
-    for row in components:
-        row_type = getattr(row, "type", None)
-        children = getattr(row, "children", None) or []
-        child_parts = []
-        for child in children:
-            child_type = getattr(child, "type", None)
-            label = getattr(child, "label", None)
-            custom_id = getattr(child, "custom_id", None)
-            options = getattr(child, "options", None)
-            if options:
-                opt_labels = [getattr(opt, "label", None) for opt in options]
-                child_parts.append(f"select(label={label!r}, id={custom_id!r}, opts={opt_labels!r})")
-            else:
-                child_parts.append(f"{child_type}(label={label!r}, id={custom_id!r})")
-        parts.append(f"row({row_type}): " + ", ".join(child_parts))
-    return " | ".join(parts)
-
-def _quiz_describe_attachments(attachments) -> str:
-    if not attachments:
-        return "[]"
-    return ", ".join(
-        f"{getattr(a, 'filename', None)!r}({getattr(a, 'content_type', None)}, {getattr(a, 'url', '')[:90]})"
-        for a in attachments
-    )
-
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -834,37 +805,18 @@ async def on_message(message):
             f"id={getattr(message.author, 'id', None)}",
             f"name={getattr(message.author, 'name', None)!r}",
             f"display_name={getattr(message.author, 'display_name', None)!r}",
+            f"global_name={getattr(message.author, 'global_name', None)!r}",
+            f"nick={getattr(message.author, 'nick', None)!r}",
             f"bot={getattr(message.author, 'bot', None)}",
             f"is_naruto={is_naruto_botto_author(message.author)}",
             f"embeds={len(message.embeds)}",
             f"content={message.content[:120]!r}",
-            f"type={message.type}",
-            f"attachments={_quiz_describe_attachments(message.attachments)}",
-            f"components={_quiz_describe_components(message.components)}",
-            f"stickers={len(message.stickers)}",
-            f"channel={getattr(getattr(message, 'channel', None), 'name', None)}",
         ]
-        if message.embeds:
-            embed_bits = []
-            for embed in message.embeds:
-                img = ""
-                if embed.image and embed.image.url:
-                    img = f" img={embed.image.url[:90]}"
-                elif embed.thumbnail and embed.thumbnail.url:
-                    img = f" thumb={embed.thumbnail.url[:90]}"
-                embed_bits.append(f"{embed.type}{img}")
-            author_bits.append("embedtypes=" + ",".join(embed_bits))
-        reference = message.reference
-        if reference and reference.message_id:
-            author_bits.append(f"reply_to={reference.message_id}")
-        interaction = getattr(message, "interaction_metadata", None) or getattr(message, "interaction", None)
-        if interaction:
-            author_bits.append(f"interaction={getattr(interaction, 'name', None)}")
         print("[QUIZ] Message seen: " + " | ".join(author_bits), flush=True)
 
     # Quiz handling should not depend on the bot-name filter; some bot/app
     # messages do not present a stable author name even though they are valid quiz embeds.
-    if ENABLE_GPT and message.author.bot and (message.embeds or message.components):
+    if ENABLE_GPT and message.embeds and message.author != bot.user:
         await maybe_answer_quiz(message)
 
     if not message.author.bot:
@@ -2254,51 +2206,6 @@ def _normalize_answer_index(answer_index, options):
         return answer_index
     return None
 
-def _collect_component_payload(message):
-    """Pull quiz text out of Discord content-components (text_display/section/buttons/selects).
-
-    Naruto Botto's new format renders the question inside text_display / section
-    components and the options as buttons (or a select menu) in an action row,
-    with empty message.content and no embeds.
-    """
-    question_lines = []
-    option_texts = []
-
-    def walk(items):
-        for item in items:
-            type_name = getattr(getattr(item, "type", None), "name", None) or str(getattr(item, "type", None))
-            if type_name == "text_display":
-                text = getattr(item, "text", None)
-                if text:
-                    question_lines.append(str(text))
-            elif type_name == "section":
-                for field in getattr(item, "fields", None) or []:
-                    field_text = getattr(field, "text", None)
-                    if field_text:
-                        question_lines.append(str(field_text))
-                accessory = getattr(item, "accessory", None)
-                if accessory is not None:
-                    walk([accessory])
-            elif type_name == "button":
-                label = getattr(item, "label", None)
-                if label:
-                    option_texts.append(str(label))
-                else:
-                    emoji = getattr(item, "emoji", None)
-                    if emoji is not None:
-                        emoji_name = getattr(emoji, "name", None)
-                        if emoji_name:
-                            option_texts.append(str(emoji_name))
-            elif type_name in ("select", "select_menu"):
-                for opt in getattr(item, "options", None) or []:
-                    label = getattr(opt, "label", None)
-                    if label:
-                        option_texts.append(str(label))
-
-    for row in message.components:
-        walk(getattr(row, "children", None) or [])
-    return question_lines, option_texts
-
 def _extract_quiz_payload(message):
     options = []
     question_bits = []
@@ -2408,22 +2315,6 @@ def _extract_quiz_payload(message):
                     add_question_text(field_name)
                 elif not noise_line_re.match(field_name):
                     add_question_text(field_name)
-
-    comp_lines, comp_options = _collect_component_payload(message)
-    for line in comp_lines:
-        line = clean_line(line)
-        if not line:
-            continue
-        if is_question_like(line):
-            add_question_text(line)
-            continue
-        match = numbered_line_re.match(line)
-        if match:
-            add_option(match.group(1))
-        elif not noise_line_re.match(line):
-            add_question_text(line)
-    for opt_text in comp_options:
-        add_option(opt_text)
 
     full_text = "\n".join(title_bits + question_bits + options).strip()
     question_text = " ".join(question_bits).strip()
