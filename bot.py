@@ -804,47 +804,74 @@ async def on_ready():
 
 def _component_text(comp):
     """Best-effort text extraction from a component (version-proof across discord.py)."""
-    for attr in ("text", "content"):
+    for attr in ("text", "content", "description", "value", "title", "name", "label"):
         value = getattr(comp, attr, None)
         if isinstance(value, str) and value.strip():
             return str(value)
     return None
 
+
+def _component_debug_attrs(comp):
+    keys = []
+    for k in ("type", "text", "content", "description", "value", "title", "name", "label", "fields", "children", "components", "accessory", "options", "emoji", "custom_id"):
+        if hasattr(comp, k):
+            v = getattr(comp, k)
+            if k in ("children", "components", "fields", "options"):
+                keys.append(f"{k}={len(v or [])}")
+            elif k == "emoji" and v is not None:
+                keys.append(f"emoji={getattr(v, 'name', None)!r}")
+            else:
+                keys.append(f"{k}={getattr(v, 'name', v)!r}")
+    return ", ".join(keys)
+
+
+def _component_children(comp):
+    """Return any nested component-like children for recursive traversal."""
+    out = []
+    for attr in ("children", "components", "fields"):
+        items = getattr(comp, attr, None) or []
+        if items:
+            out.extend(items)
+    accessory = getattr(comp, "accessory", None)
+    if accessory is not None:
+        out.append(accessory)
+    return out
+
+
 def _quiz_describe_components(components) -> str:
     if not components:
         return "[]"
     parts = []
+
+    def describe_item(item):
+        type_name = getattr(getattr(item, "type", None), "name", None) or str(getattr(item, "type", None))
+        label = getattr(item, "label", None)
+        custom_id = getattr(item, "custom_id", None)
+        emoji = getattr(item, "emoji", None)
+        emoji_bit = ""
+        if emoji is not None:
+            emoji_bit = f" emoji={getattr(emoji, 'name', None)!r}"
+        text_bit = ""
+        comp_text = _component_text(item)
+        if comp_text:
+            text_bit = f" text={comp_text[:80]!r}"
+        options = getattr(item, "options", None)
+        if options:
+            opt_labels = [getattr(opt, "label", None) for opt in options]
+            return f"select(label={label!r}, id={custom_id!r}, opts={opt_labels!r})"
+        children = _component_children(item)
+        if children:
+            nested = ", ".join(describe_item(child) for child in children)
+            return f"{type_name}(label={label!r}, id={custom_id!r}{emoji_bit}{text_bit}, children=[{nested}])"
+        debug = _component_debug_attrs(item)
+        if debug:
+            return f"{type_name}(label={label!r}, id={custom_id!r}{emoji_bit}{text_bit}, dbg={debug})"
+        return f"{type_name}(label={label!r}, id={custom_id!r}{emoji_bit}{text_bit})"
+
     for row in components:
         row_type = getattr(row, "type", None)
         children = getattr(row, "children", None) or []
-        child_parts = []
-        for child in children:
-            child_type = getattr(child, "type", None)
-            type_name = getattr(child_type, "name", None) or str(child_type)
-            label = getattr(child, "label", None)
-            custom_id = getattr(child, "custom_id", None)
-            emoji = getattr(child, "emoji", None)
-            emoji_bit = ""
-            if emoji is not None:
-                emoji_bit = f" emoji={getattr(emoji, 'name', None)!r}"
-            text_bit = ""
-            comp_text = _component_text(child)
-            if comp_text:
-                text_bit = f" text={comp_text[:80]!r}"
-            options = getattr(child, "options", None)
-            if options:
-                opt_labels = [getattr(opt, "label", None) for opt in options]
-                child_parts.append(f"select(label={label!r}, id={custom_id!r}, opts={opt_labels!r})")
-                continue
-            fields = getattr(child, "fields", None)
-            if fields:
-                field_texts = [_component_text(f) for f in fields]
-                child_parts.append(f"{type_name}(fields={field_texts!r})")
-                continue
-            if type_name in ("button", "text_display", "section", "separator"):
-                child_parts.append(f"{type_name}(label={label!r}, id={custom_id!r}{emoji_bit}{text_bit})")
-                continue
-            child_parts.append(f"{type_name}(label={label!r}, id={custom_id!r}{emoji_bit}{text_bit})")
+        child_parts = [describe_item(child) for child in children]
         parts.append(f"row({row_type}): " + ", ".join(child_parts))
     return " | ".join(parts)
 
@@ -2298,29 +2325,29 @@ def _collect_component_payload(message):
     question_lines = []
     option_texts = []
 
+    def iter_nested(item):
+        for attr in ("children", "components", "fields"):
+            for nested in getattr(item, attr, None) or []:
+                yield nested
+        accessory = getattr(item, "accessory", None)
+        if accessory is not None:
+            yield accessory
+
+    def add_text(text):
+        if not text:
+            return
+        cleaned = re.sub(r"\s+", " ", str(text)).strip()
+        if cleaned:
+            question_lines.append(cleaned)
+
     def walk(items):
         for item in items:
+            if item is None:
+                continue
             type_name = getattr(getattr(item, "type", None), "name", None) or str(getattr(item, "type", None))
-            if type_name == "text_display":
-                text = _component_text(item)
-                if text:
-                    question_lines.append(text)
-            elif type_name == "section":
-                field_texts = []
-                for field in getattr(item, "fields", None) or []:
-                    field_text = _component_text(field)
-                    if field_text:
-                        field_texts.append(field_text)
-                if field_texts:
-                    question_lines.extend(field_texts)
-                else:
-                    section_text = _component_text(item)
-                    if section_text:
-                        question_lines.append(section_text)
-                accessory = getattr(item, "accessory", None)
-                if accessory is not None:
-                    walk([accessory])
-            elif type_name == "button":
+
+            # Capture any visible text on the item itself first.
+            if type_name == "button":
                 label = getattr(item, "label", None)
                 if label:
                     option_texts.append(str(label))
@@ -2330,15 +2357,26 @@ def _collect_component_payload(message):
                         emoji_name = getattr(emoji, "name", None)
                         if emoji_name:
                             option_texts.append(str(emoji_name))
-                    else:
-                        text = _component_text(item)
-                        if text:
-                            option_texts.append(text)
-            elif type_name in ("select", "select_menu"):
+                for nested in iter_nested(item):
+                    walk([nested])
+                continue
+
+            if type_name in ("select", "select_menu"):
                 for opt in getattr(item, "options", None) or []:
                     label = getattr(opt, "label", None)
                     if label:
                         option_texts.append(str(label))
+                for nested in iter_nested(item):
+                    walk([nested])
+                continue
+
+            text = _component_text(item)
+            if text:
+                add_text(text)
+
+            # Recurse through any nested structure regardless of component type.
+            for nested in iter_nested(item):
+                walk([nested])
 
     for row in message.components:
         walk(getattr(row, "children", None) or [])
