@@ -891,7 +891,7 @@ async def on_message(message):
         reference = message.reference
         if reference and reference.message_id:
             author_bits.append(f"reply_to={reference.message_id}")
-        interaction = getattr(message, "interaction_metadata", None) or getattr(message, "interaction", None)
+        interaction = getattr(message, "interaction_metadata", None)
         if interaction:
             author_bits.append(f"interaction={getattr(interaction, 'name', None)}")
         print("[QUIZ] Message seen: " + " | ".join(author_bits), flush=True)
@@ -2746,10 +2746,31 @@ async def on_message_edit(before, after):
     if after.author == bot.user:
         return
     if QUIZ_DEBUG:
-        quiz_log(
-            f"Message edit seen: id={after.id} | bot={after.author.bot} "
-            f"embeds={len(after.embeds)} content={after.content[:120]!r}"
-        )
+        edit_bits = [
+            f"id={after.id}",
+            f"bot={after.author.bot}",
+            f"embeds={len(after.embeds)}",
+            f"content={after.content[:160]!r}",
+            f"type={after.type}",
+            f"attachments={_quiz_describe_attachments(after.attachments)}",
+            f"components={_quiz_describe_components(after.components)}",
+            f"stickers={len(after.stickers)}",
+            f"channel={getattr(getattr(after, 'channel', None), 'name', None)}",
+        ]
+        if after.embeds:
+            embed_bits = []
+            for embed in after.embeds:
+                img = ""
+                if embed.image and embed.image.url:
+                    img = f" img={embed.image.url[:90]}"
+                elif embed.thumbnail and embed.thumbnail.url:
+                    img = f" thumb={embed.thumbnail.url[:90]}"
+                embed_bits.append(f"{embed.type}{img}")
+            edit_bits.append("embedtypes=" + ",".join(embed_bits))
+        interaction = getattr(after, "interaction_metadata", None)
+        if interaction:
+            edit_bits.append(f"interaction={getattr(interaction, 'name', None)}")
+        quiz_log("Message edit seen: " + " | ".join(edit_bits))
     # Naruto Botto posts an empty skeleton message and often fills the question
     # in via an edit — treat edited messages like new ones for quiz detection.
     if ENABLE_GPT and after.author.bot and (after.embeds or after.components or after.content):
